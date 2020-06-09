@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	"github.com/operator-framework/operator-sdk/pkg/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -19,6 +20,21 @@ type CrcClusterStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
+
+	// ApiUrl is the URL of the cluster's API server
+	ApiUrl string `json:"apiUrl,omitempty"`
+
+	// ConsoleUrl is the URL of the cluster's web console
+	ConsoleUrl string `json:"consoleUrl,omitempty"`
+
+	// Kubeconfig is the kubeconfig to connect to the cluster as an administrator
+	Kubeconfig string `json:"kubeconfig,omitempty"`
+
+	// KubeAdminPassword is the password to connect to the cluster as an administrator
+	KubeAdminPassword string `json:"kubeAdminPassword,omitempty"`
+
+	// Conditions represent the latest available observations of an object's state
+	Conditions status.Conditions `json:"conditions"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
