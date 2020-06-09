@@ -1,3 +1,8 @@
+bundle-containers/*.qcow2
+pull-secret
+
+# Generated .gitignore below here
+
 # Temporary Build Files
 build/_output
 build/_test
