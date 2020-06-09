@@ -1,9 +1,9 @@
-# CodeReady Containers (CRC) Operator
+# Experimental CodeReady Containers (CRC) Operator
 
-The high level goal of this operator is to let users login to a shared
-OpenShift 4 cluster, click a button, and get their own private
-OpenShift 4 cluster sandbox with full admin access in 5 minutes or
-less.
+This is an unofficial, experimental operator with the high level goal
+of this operator is to let users login to a shared OpenShift 4
+cluster, click a button, and get their own private OpenShift 4 cluster
+sandbox with full admin access in 5 minutes or less.
 
 It does this by using [CodeReady Containers
 (CRC)](https://developers.redhat.com/products/codeready-containers)
