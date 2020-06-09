@@ -1,0 +1,7 @@
+apiVersion: crc.developer.openshift.io/v1alpha1
+kind: CrcCluster
+metadata:
+  name: example-crccluster
+spec:
+  # Add fields here
+  size: 3
