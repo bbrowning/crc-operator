@@ -48,7 +48,7 @@ deployment below is more complete and reliable. But, if you're brave:
 Create the CrcCluster CRD
 
 ```
-oc create -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
+oc apply -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
 ```
 
 Run the operator locally
@@ -74,6 +74,10 @@ place of `crc` in the commands below.
 oc new-project crc
 ./crcStart.sh my-cluster crc pull-secret
 ```
+
+# Development
+
+For developer crc-operator itself, see [DEVELOPMENT.md]().
 
 # Other Notes Below
 
