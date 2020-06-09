@@ -8,6 +8,8 @@ spec:
     kind: CrcCluster
     listKind: CrcClusterList
     plural: crcclusters
+    shortNames:
+    - crc
     singular: crccluster
   scope: Namespaced
   versions:
@@ -35,7 +37,7 @@ spec:
             description: CrcClusterStatus defines the observed state of CrcCluster
             properties:
               apiUrl:
-                description: ApiUrl is the URL of the cluster's API server
+                description: APIURL is the URL of the cluster's API server
                 type: string
               conditions:
                 description: Conditions represent the latest available observations
@@ -79,7 +81,7 @@ spec:
                   type: object
                 type: array
               consoleUrl:
-                description: ConsoleUrl is the URL of the cluster's web console
+                description: ConsoleURL is the URL of the cluster's web console
                 type: string
               kubeAdminPassword:
                 description: KubeAdminPassword is the password to connect to the cluster

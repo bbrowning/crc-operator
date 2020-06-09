@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kubevirtv1 "kubevirt.io/client-go/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -84,8 +85,8 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	reqLogger.Info("Reconciling CrcCluster")
 
 	// Fetch the CrcCluster instance
-	crcCluster := &crcv1alpha1.CrcCluster{}
-	err := r.client.Get(context.TODO(), request.NamespacedName, crcCluster)
+	existingCrc := &crcv1alpha1.CrcCluster{}
+	err := r.client.Get(context.TODO(), request.NamespacedName, existingCrc)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -98,48 +99,48 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		reqLogger.Error(err, "Failed to get CrcCluster.")
 		return reconcile.Result{}, err
 	}
+	crc := existingCrc.DeepCopy()
+
+	// Initialize status conditions
+	if len(crc.Status.Conditions) == 0 {
+		return r.initializeStatusConditions(crc)
+	}
 
 	// Check if the VirtualMachine already exists. If it doesn't,
-	// create a new one
-	virtualMachine := &kubevirtv1.VirtualMachine{}
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: crcCluster.Name, Namespace: crcCluster.Namespace}, virtualMachine)
+	// create a new one.
+	existingVirtualMachine := &kubevirtv1.VirtualMachine{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: crc.Name, Namespace: crc.Namespace}, existingVirtualMachine)
 	if err != nil && errors.IsNotFound(err) {
-		vm, err := r.newVirtualMachineForCrcCluster(crcCluster)
-		if err != nil {
-			reqLogger.Error(err, "Failed to create VirtualMachine.", "VirtualMachine.Namespace", vm.Namespace, "VirtualMachine.Name", vm.Name)
-			return reconcile.Result{}, err
-		}
-
-		reqLogger.Info("Creating a new VirtualMachine", "VirtualMachine.Namespace", vm.Namespace, "VirtualMachine.Name", vm.Name)
-		err = r.client.Create(context.TODO(), vm)
-		if err != nil {
-			reqLogger.Error(err, "Failed to create VirtualMachine.", "VirtualMachine.Namespace", vm.Namespace, "VirtualMachine.Name", vm.Name)
-			return reconcile.Result{}, err
-		}
-
-		// VirtualMachine created successfully return and requeue so
-		// further processing can happen
-		return reconcile.Result{Requeue: true}, nil
+		return r.createVirtualMachineForCrcCluster(crc)
 	} else if err != nil {
 		reqLogger.Error(err, "Failed to get VirtualMachine.")
 		return reconcile.Result{}, err
 	}
+	virtualMachine := existingVirtualMachine.DeepCopy()
+
+	// Check i the Kubernetes Service already exists. If it doesn't,
+	// create a new one.
+	existingK8sService := &corev1.Service{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: crc.Name, Namespace: crc.Namespace}, existingK8sService)
+	if err != nil && errors.IsNotFound(err) {
+		return r.createServiceForCrcCluster(crc)
+	} else if err != nil {
+		reqLogger.Error(err, "Failed to get Kubernetes Service.")
+		return reconcile.Result{}, err
+	}
+	k8sService := existingK8sService.DeepCopy()
 
 	crcStatus := crcv1alpha1.CrcClusterStatus{}
-	crcCluster.Status.DeepCopyInto(&crcStatus)
-	crcStatus.KubeAdminPassword = "DEP6h-PvR7K-7fYqe-IhLUP"
+	crc.Status.DeepCopyInto(&crcStatus)
 
-	// Update conditions
-	vmNotReadyCondition := status.Condition{
-		Type:   crcv1alpha1.ConditionTypeVirtualMachineNotReady,
-		Status: corev1.ConditionTrue,
-	}
-	crcStatus.Conditions.SetCondition(vmNotReadyCondition)
+	r.updateVirtualMachineNotReadyCondition(virtualMachine, &crcStatus)
+	r.updateNetworkingNotReadyCondition(k8sService, &crcStatus)
+	r.updateCredentials(&crcStatus)
 
 	// Update status if needed
-	if !reflect.DeepEqual(crcCluster.Status, crcStatus) {
-		crcCluster.Status = crcStatus
-		err := r.client.Status().Update(context.TODO(), crcCluster)
+	if !reflect.DeepEqual(crc.Status, crcStatus) {
+		crc.Status = crcStatus
+		err := r.client.Status().Update(context.TODO(), crc)
 		if err != nil {
 			reqLogger.Error(err, "Failed to update CrcCluster status.")
 			return reconcile.Result{}, err
@@ -147,6 +148,112 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 
 	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileCrcCluster) initializeStatusConditions(crc *crcv1alpha1.CrcCluster) (reconcile.Result, error) {
+	reqLogger := log.WithValues("CrcCluster.Namespace", crc.Namespace, "CrcCluster.Name", crc.Name)
+
+	crc.Status.Conditions = status.NewConditions(
+		status.Condition{
+			Type:   crcv1alpha1.ConditionTypeVirtualMachineNotReady,
+			Status: corev1.ConditionTrue,
+		},
+		status.Condition{
+			Type:   crcv1alpha1.ConditionTypeNetworkingNotReady,
+			Status: corev1.ConditionTrue,
+		},
+		status.Condition{
+			Type:   crcv1alpha1.ConditionTypeClusterNotReady,
+			Status: corev1.ConditionTrue,
+		},
+	)
+
+	err := r.client.Status().Update(context.TODO(), crc)
+	if err != nil {
+		reqLogger.Error(err, "Failed to initialize CrcCluster status.")
+		return reconcile.Result{}, err
+	}
+
+	// Status conditions initialized successfully - requeue for
+	// further processing
+	return reconcile.Result{Requeue: true}, nil
+}
+
+func (r *ReconcileCrcCluster) createVirtualMachineForCrcCluster(crc *crcv1alpha1.CrcCluster) (reconcile.Result, error) {
+	reqLogger := log.WithValues("CrcCluster.Namespace", crc.Namespace, "CrcCluster.Name", crc.Name)
+
+	vm, err := r.newVirtualMachineForCrcCluster(crc)
+	if err != nil {
+		reqLogger.Error(err, "Failed to create VirtualMachine.", "VirtualMachine.Namespace", vm.Namespace, "VirtualMachine.Name", vm.Name)
+		return reconcile.Result{}, err
+	}
+
+	reqLogger.Info("Creating a new VirtualMachine", "VirtualMachine.Namespace", vm.Namespace, "VirtualMachine.Name", vm.Name)
+	err = r.client.Create(context.TODO(), vm)
+	if err != nil {
+		reqLogger.Error(err, "Failed to create VirtualMachine.", "VirtualMachine.Namespace", vm.Namespace, "VirtualMachine.Name", vm.Name)
+		return reconcile.Result{}, err
+	}
+
+	// VirtualMachine created successfully - requeue for further
+	// processing
+	return reconcile.Result{Requeue: true}, nil
+}
+
+func (r *ReconcileCrcCluster) createServiceForCrcCluster(crc *crcv1alpha1.CrcCluster) (reconcile.Result, error) {
+	reqLogger := log.WithValues("CrcCluster.Namespace", crc.Namespace, "CrcCluster.Name", crc.Name)
+
+	svc, err := r.newServiceForCrcCluster(crc)
+	if err != nil {
+		reqLogger.Error(err, "Failed to create Kubernetes Service.", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
+		return reconcile.Result{}, err
+	}
+
+	reqLogger.Info("Creating a new Kubernetes Service", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
+	err = r.client.Create(context.TODO(), svc)
+	if err != nil {
+		reqLogger.Error(err, "Failed to create Kubernetes Service.", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
+		return reconcile.Result{}, err
+	}
+
+	// Service created successfully- requeue for further processing
+	return reconcile.Result{Requeue: true}, nil
+}
+
+func (r *ReconcileCrcCluster) updateVirtualMachineNotReadyCondition(vm *kubevirtv1.VirtualMachine, crcStatus *crcv1alpha1.CrcClusterStatus) {
+	conditionValue := corev1.ConditionTrue
+	if vm.Status.Ready {
+		conditionValue = corev1.ConditionFalse
+	}
+
+	condition := status.Condition{
+		Type:   crcv1alpha1.ConditionTypeVirtualMachineNotReady,
+		Status: conditionValue,
+	}
+	crcStatus.Conditions.SetCondition(condition)
+}
+
+func (r *ReconcileCrcCluster) updateNetworkingNotReadyCondition(svc *corev1.Service, crcStatus *crcv1alpha1.CrcClusterStatus) {
+	// TODO: Assuming networking is ready just because the K8s Service
+	// has a ClusterIP is not really enough to signify the networking
+	// is actually ready and the VM is reachable
+	conditionValue := corev1.ConditionTrue
+	if svc.Spec.ClusterIP != "" {
+		conditionValue = corev1.ConditionFalse
+	}
+
+	condition := status.Condition{
+		Type:   crcv1alpha1.ConditionTypeNetworkingNotReady,
+		Status: conditionValue,
+	}
+	crcStatus.Conditions.SetCondition(condition)
+}
+
+func (r *ReconcileCrcCluster) updateCredentials(crcStatus *crcv1alpha1.CrcClusterStatus) {
+	if crcStatus.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) &&
+		crcStatus.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeNetworkingNotReady) {
+		crcStatus.KubeAdminPassword = "DEP6h-PvR7K-7fYqe-IhLUP"
+	}
 }
 
 // TODO: Obviously none of the hardcoded image/cpu/memory values below
@@ -252,9 +359,59 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 		},
 	}
 
-	// Set CrcCluster instance as the owner and controller
 	if err := controllerutil.SetControllerReference(crc, vm, r.scheme); err != nil {
 		return vm, err
 	}
+
 	return vm, nil
+}
+
+func (r *ReconcileCrcCluster) newServiceForCrcCluster(crc *crcv1alpha1.CrcCluster) (*corev1.Service, error) {
+	labels := map[string]string{
+		"crcCluster": crc.Name,
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crc.Name,
+			Namespace: crc.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ssh",
+					Protocol:   corev1.ProtocolTCP,
+					Port:       2022,
+					TargetPort: intstr.FromInt(22),
+				},
+				{
+					Name:       "api",
+					Protocol:   corev1.ProtocolTCP,
+					Port:       6443,
+					TargetPort: intstr.FromInt(6443),
+				},
+				{
+					Name:       "http",
+					Protocol:   corev1.ProtocolTCP,
+					Port:       80,
+					TargetPort: intstr.FromInt(80),
+				},
+				{
+					Name:       "https",
+					Protocol:   corev1.ProtocolTCP,
+					Port:       443,
+					TargetPort: intstr.FromInt(443),
+				},
+			},
+			Selector: map[string]string{"crcCluster": crc.Name},
+			Type:     corev1.ServiceTypeClusterIP,
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(crc, svc, r.scheme); err != nil {
+		return svc, err
+	}
+
+	return svc, nil
 }

@@ -53,7 +53,8 @@ type CrcClusterStatus struct {
 
 // CrcCluster is the Schema for the crcclusters API
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:path=crcclusters,scope=Namespaced
+// +kubebuilder:resource:path=crcclusters,scope=Namespaced,shortName=crc
+//
 type CrcCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
