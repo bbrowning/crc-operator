@@ -184,11 +184,13 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		if len(route.Status.Ingress) > 0 && route.Status.Ingress[0].Host != "" {
-			crcStatus.APIURL = fmt.Sprintf("https://%s", route.Status.Ingress[0].Host)
-		}
+		crcStatus.APIURL = fmt.Sprintf("https://%s", route.Spec.Host)
 	} else {
-		// Kubernetes Ingress
+		ingress, err := r.ensureIngressExists(reqLogger, crc)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		crcStatus.APIURL = fmt.Sprintf("https://%s", ingress.Spec.Rules[0].Host)
 	}
 
 	r.updateVirtualMachineNotReadyCondition(virtualMachine, &crcStatus)
@@ -335,6 +337,40 @@ func (r *ReconcileCrcCluster) ensureRouteExists(logger logr.Logger, crc *crcv1al
 	}
 	route = existingRoute.DeepCopy()
 	return route, nil
+}
+
+func (r *ReconcileCrcCluster) ensureIngressExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*networkingv1beta1.Ingress, error) {
+	ingress, err := r.newIngressForCrcCluster(crc)
+	if err != nil {
+		logger.Error(err, "Failed to create Kubernetes Ingress.", "Ingress.Namespace", ingress.Namespace, "Ingress.Name", ingress.Name)
+		return nil, err
+	}
+
+	// Check if the Kubernetes Ingress already exists. If it doesn't,
+	// create a new one.
+	existingIngress := &networkingv1beta1.Ingress{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, existingIngress)
+	if err != nil && errors.IsNotFound(err) {
+		logger.Info("Creating a new Kubernetes Ingress.", "Ingress.Namespace", ingress.Namespace, "Ingress.Name", ingress.Name)
+		err = r.client.Create(context.TODO(), ingress)
+		if err != nil {
+			logger.Error(err, "Failed to create Kubernetes Ingress.", "Ingress.Namespace", ingress.Namespace, "Ingress.Name", ingress.Name)
+			return nil, err
+		}
+
+		// Get the Kubernetes Ingress again
+		existingIngress = &networkingv1beta1.Ingress{}
+		err = r.client.Get(context.TODO(), types.NamespacedName{Name: ingress.Name, Namespace: ingress.Namespace}, existingIngress)
+		if err != nil {
+			logger.Error(err, "Failed to get Kubernetes Ingress.")
+			return nil, err
+		}
+	} else if err != nil {
+		logger.Error(err, "Failed to get Kubernetes Ingress.")
+		return nil, err
+	}
+	ingress = existingIngress.DeepCopy()
+	return ingress, nil
 }
 
 func (r *ReconcileCrcCluster) updateVirtualMachineNotReadyCondition(vm *kubevirtv1.VirtualMachine, crcStatus *crcv1alpha1.CrcClusterStatus) {
@@ -569,4 +605,73 @@ func (r *ReconcileCrcCluster) newRouteForCrcCluster(crc *crcv1alpha1.CrcCluster)
 		return route, err
 	}
 	return route, nil
+}
+
+func (r *ReconcileCrcCluster) newIngressForCrcCluster(crc *crcv1alpha1.CrcCluster) (*networkingv1beta1.Ingress, error) {
+	labels := map[string]string{
+		"crcCluster": crc.Name,
+	}
+
+	annotations := map[string]string{
+		"kubernetes.io/ingress.allow-http":             "false",
+		"nginx.ingress.kubernetes.io/ssl-passthrough":  "true",
+		"nginx.ingress.kubernetes.io/backend-protocol": "HTTPS",
+	}
+
+	httpIngress := networkingv1beta1.HTTPIngressRuleValue{
+		Paths: []networkingv1beta1.HTTPIngressPath{
+			{
+				Path: "/",
+				Backend: networkingv1beta1.IngressBackend{
+					ServiceName: crc.Name,
+					ServicePort: intstr.FromInt(6443),
+				},
+			},
+		},
+	}
+
+	ingress := &networkingv1beta1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        fmt.Sprintf("%s-api", crc.Name),
+			Namespace:   crc.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: networkingv1beta1.IngressSpec{
+			Rules: []networkingv1beta1.IngressRule{
+				{
+					IngressRuleValue: networkingv1beta1.IngressRuleValue{
+						HTTP: &httpIngress,
+					},
+				},
+			},
+		},
+	}
+
+	// Get the ingress-nginx load balancer ip/host
+	ingressNginxSvc := &corev1.Service{}
+	if err := r.client.Get(context.TODO(), types.NamespacedName{Name: "nginx-ingress-ingress-nginx-controller", Namespace: "ingress-nginx"}, ingressNginxSvc); err != nil {
+		return ingress, fmt.Errorf("Failed to get ingress-nginx service - is ingress-nginx installed? Error: %v", err)
+	}
+
+	noIngressIPHostError := fmt.Errorf("ingress-nginx load balancer does not have an ingress ip/host yet: %v", ingressNginxSvc.Status)
+	if len(ingressNginxSvc.Status.LoadBalancer.Ingress) < 1 {
+		return ingress, noIngressIPHostError
+	}
+	lbIngress := ingressNginxSvc.Status.LoadBalancer.Ingress[0]
+	lbHost := lbIngress.Hostname
+	if lbHost == "" {
+		if lbIngress.IP == "" {
+			return ingress, noIngressIPHostError
+		}
+		lbHost = fmt.Sprintf("%s.nip.io", lbIngress.IP)
+	}
+
+	ingress.Spec.Rules[0].Host = fmt.Sprintf("api.%s-%s.%s", crc.Name, crc.Namespace, lbHost)
+
+	if err := controllerutil.SetControllerReference(crc, ingress, r.scheme); err != nil {
+		return ingress, err
+	}
+
+	return ingress, nil
 }
