@@ -15,17 +15,29 @@ type CrcClusterSpec struct {
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
 }
 
+const (
+	// ConditionTypeVirtualMachineNotReady indicates if the VirtualMachine is not ready
+	ConditionTypeVirtualMachineNotReady status.ConditionType = "VirtualMachineNotReady"
+
+	// ConditionTypeNetworkingNotReady indicates if the networking
+	// setup to route traffic into the cluster is not ready
+	ConditionTypeNetworkingNotReady status.ConditionType = "NetworkingNotReady"
+
+	// ConditionTypeClusterNotReady indicates if the OpenShift cluster is not ready
+	ConditionTypeClusterNotReady status.ConditionType = "ClusterNotReady"
+)
+
 // CrcClusterStatus defines the observed state of CrcCluster
 type CrcClusterStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
 
-	// ApiUrl is the URL of the cluster's API server
-	ApiUrl string `json:"apiUrl,omitempty"`
+	// APIURL is the URL of the cluster's API server
+	APIURL string `json:"apiUrl,omitempty"`
 
-	// ConsoleUrl is the URL of the cluster's web console
-	ConsoleUrl string `json:"consoleUrl,omitempty"`
+	// ConsoleURL is the URL of the cluster's web console
+	ConsoleURL string `json:"consoleUrl,omitempty"`
 
 	// Kubeconfig is the kubeconfig to connect to the cluster as an administrator
 	Kubeconfig string `json:"kubeconfig,omitempty"`

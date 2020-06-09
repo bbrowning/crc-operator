@@ -40,7 +40,30 @@ on OpenShift or
 [KubeVirt](https://kubevirt.io/user-guide/#/installation/installation)
 (on Kubernetes).
 
-### Scripted Deploy
+### Operator Deployment of CRC Clusters
+
+The operator is a work-in-progress. At the moment, the scripted
+deployment below is more complete and reliable. But, if you're brave:
+
+Create the CrcCluster CRD
+
+```
+oc create -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
+```
+
+Run the operator locally
+
+```
+operator-sdk run local --watch-namespace=""
+```
+
+Create a CrcCluster CR
+
+```
+oc apply -f deploy/crds/crc.developer.openshift.io_v1alpha1_crccluster_cr.yaml
+```
+
+### Scripted Deployment of CRC Clusters
 
 Clone this repo, copy your OpenShift pull secret into a file called
 `pull-secret`, and run the commands below. You can substitute any name
