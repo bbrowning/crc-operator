@@ -52,11 +52,15 @@ spec:
           status:
             description: CrcClusterStatus defines the observed state of CrcCluster
             properties:
-              apiUrl:
+              apiURL:
                 description: APIURL is the URL of the cluster's API server
                 type: string
               baseDomain:
                 description: BaseDomain is the base domain of the cluster's URLs
+                type: string
+              clusterID:
+                description: ClusterID is the ID of this cluster, only really used
+                  if connected cluster features are enabled
                 type: string
               conditions:
                 description: Conditions represent the latest available observations
@@ -99,7 +103,7 @@ spec:
                   - type
                   type: object
                 type: array
-              consoleUrl:
+              consoleURL:
                 description: ConsoleURL is the URL of the cluster's web console
                 type: string
               kubeAdminPassword:

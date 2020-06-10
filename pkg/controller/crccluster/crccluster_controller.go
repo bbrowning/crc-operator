@@ -14,6 +14,7 @@ import (
 	libMachineLog "github.com/code-ready/machine/libmachine/log"
 	sshClient "github.com/code-ready/machine/libmachine/ssh"
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	configv1 "github.com/openshift/api/config/v1"
 	routev1 "github.com/openshift/api/route/v1"
 	"github.com/operator-framework/operator-sdk/pkg/status"
@@ -181,10 +182,8 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 
 	// Initialize status conditions
 	if len(crc.Status.Conditions) == 0 {
-		return r.initializeStatusConditions(reqLogger, crc)
+		crc, err = r.initializeStatusConditions(reqLogger, crc)
 	}
-	crcStatus := crcv1alpha1.CrcClusterStatus{}
-	crc.Status.DeepCopyInto(&crcStatus)
 
 	virtualMachine, err := r.ensureVirtualMachineExists(reqLogger, crc)
 	if err != nil {
@@ -210,88 +209,86 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 		apiHost = ingress.Spec.Rules[0].Host
 	}
-	crcStatus.APIURL = fmt.Sprintf("https://%s", apiHost)
-	crcStatus.BaseDomain = strings.Replace(apiHost, "api.", "", 1)
+	crc.Status.APIURL = fmt.Sprintf("https://%s", apiHost)
+	crc.Status.BaseDomain = strings.Replace(apiHost, "api.", "", 1)
 
-	r.updateVirtualMachineNotReadyCondition(virtualMachine, &crcStatus)
-	r.updateNetworkingNotReadyCondition(k8sService, &crcStatus)
-	r.updateCredentials(&crcStatus)
+	r.updateVirtualMachineNotReadyCondition(virtualMachine, crc)
+	r.updateNetworkingNotReadyCondition(k8sService, crc)
+	r.updateCredentials(crc)
 
-	// Update status if needed
-	statusUpdated, err := r.updateCrcClusterStatus(reqLogger, crc, crcStatus)
+	crc, err = r.updateCrcClusterStatus(reqLogger, crc)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	if statusUpdated {
-		return reconcile.Result{Requeue: true}, nil
-	}
 
 	// Don't attempt any further reconciling until the VM is ready
-	if crcStatus.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) {
+	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) {
 		reqLogger.Info("Waiting on the VirtualMachine to become Ready before continuing")
 		return reconcile.Result{}, nil
 	}
 
-	// If we got this far the VM is ready and should be accessible via
-	// SSH
 	sshClient, err := createSSHClient(k8sService)
 	if err != nil {
 		reqLogger.Error(err, "Failed to create SSH Client.")
 		return reconcile.Result{}, err
 	}
-	output, err := sshClient.Output("pwd")
-	if err != nil || output == "" {
-		reqLogger.Error(err, "Failed to run SSH command")
-		return reconcile.Result{}, err
+
+	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeKubeletNotReady) {
+		crc, err = r.ensureKubeletStarted(reqLogger, sshClient, crc)
+		if err != nil {
+			reqLogger.Error(err, "Failed to start Kubelet.")
+			return reconcile.Result{}, err
+		}
 	}
 
-	err = r.ensureKubeletStarted(reqLogger, sshClient, &crcStatus)
-	if err != nil {
-		reqLogger.Error(err, "Failed to start Kubelet.")
-		return reconcile.Result{}, err
+	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
+		crc, err = r.ensureClusterConfigured(reqLogger, sshClient, crc)
+		if err != nil {
+			reqLogger.Error(err, "Failed to configure cluster.")
+			return reconcile.Result{}, err
+		}
 	}
 
-	err = r.ensureClusterConfigured(reqLogger, sshClient, crc.Spec.PullSecret, &crcStatus)
-	if err != nil {
-		reqLogger.Error(err, "Failed to configure cluster.")
-		return reconcile.Result{}, err
-	}
-
-	condition := status.Condition{
-		Type:   crcv1alpha1.ConditionTypeReady,
-		Status: corev1.ConditionTrue,
-	}
-	crcStatus.Conditions.SetCondition(condition)
-
-	// And update status again
-	statusUpdated, err = r.updateCrcClusterStatus(reqLogger, crc, crcStatus)
+	crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
+	crc, err = r.updateCrcClusterStatus(reqLogger, crc)
 	if err != nil {
 		return reconcile.Result{}, err
-	}
-	if statusUpdated {
-		return reconcile.Result{Requeue: true}, nil
 	}
 
 	return reconcile.Result{}, nil
 }
 
-func (r *ReconcileCrcCluster) updateCrcClusterStatus(logger logr.Logger, crc *crcv1alpha1.CrcCluster, crcStatus crcv1alpha1.CrcClusterStatus) (bool, error) {
-	if !reflect.DeepEqual(crc.Status, crcStatus) {
-		crc.Status = crcStatus
+func (r *ReconcileCrcCluster) updateCrcClusterStatus(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
+	existingCrc := &crcv1alpha1.CrcCluster{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: crc.Name, Namespace: crc.Namespace}, existingCrc)
+	if err != nil {
+		return crc, err
+	}
+	if !reflect.DeepEqual(crc.Status, existingCrc.Status) {
 		err := r.client.Status().Update(context.TODO(), crc)
 		if err != nil {
 			logger.Error(err, "Failed to update CrcCluster status.")
-			return false, err
+			return crc, err
 		}
-		return true, nil
+		updatedCrc := &crcv1alpha1.CrcCluster{}
+		err = r.client.Get(context.TODO(), types.NamespacedName{Name: crc.Name, Namespace: crc.Namespace}, updatedCrc)
+		if err != nil {
+			return crc, err
+		}
+		crc = updatedCrc.DeepCopy()
 	}
-	return false, nil
+	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) ensureClusterConfigured(logger logr.Logger, sshClient sshClient.Client, pullSecret string, crcStatus *crcv1alpha1.CrcClusterStatus) error {
-	if crcStatus.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
-		// cluster is already ready, so nothing to do
-		return nil
+func (r *ReconcileCrcCluster) ensureClusterConfigured(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
+
+	if crc.Status.ClusterID == "" {
+		clusterID, err := uuid.NewRandom()
+		if err != nil {
+			logger.Error(err, "Error generating clusterID.")
+			return crc, err
+		}
+		crc.Status.ClusterID = clusterID.String()
 	}
 
 	configureScript := fmt.Sprintf(`
@@ -305,7 +302,7 @@ export OCCRC="oc --insecure-skip-tls-verify --kubeconfig /tmp/kubeconfig"
 ${OCCRC} patch secret pull-secret -p "{\"data\":{\".dockerconfigjson\":\"%[1]s\"}}" -n openshift-config --type merge
 
 ${OCCRC} get clusterversion version
-${OCCRC} patch clusterversion version -p "{\"spec\":{\"clusterID\":\"$(uuidgen)\"}}" --type merge
+${OCCRC} patch clusterversion version -p "{\"spec\":{\"clusterID\":\"%[4]s\"}}" --type merge
 
 [ ! -z "${OCCRC} get configmaps/extension-apiserver-authentication -o jsonpath={.data.requestheader-client-ca-file} -n kube-system)" ]
 
@@ -320,35 +317,35 @@ done
 if [ $? == 0 ]; then
   echo "__cluster_configured: true"
 fi
-`, pullSecret, crcStatus.Kubeconfig, crcStatus.APIURL)
+`, crc.Spec.PullSecret, crc.Status.Kubeconfig, crc.Status.APIURL, crc.Status.ClusterID)
 
 	fmt.Printf("!!! configureScript is:\n\n\n%s\n\n\n", configureScript)
 	output, err := sshClient.Output(configureScript)
 	if err != nil {
 		logger.Error(err, "Error configuring cluster.")
 		fmt.Println(output)
-		return err
+		return crc, err
 	}
 	logger.Info(fmt.Sprintf("Configure script output: %s", output))
 	clusterConfigured := strings.Contains(output, "__cluster_configured: true")
 	if !clusterConfigured {
-		return fmt.Errorf("Error configuring cluster: %s", output)
+		return crc, fmt.Errorf("Error configuring cluster: %s", output)
 	}
 
-	condition := status.Condition{
-		Type:   crcv1alpha1.ConditionTypeClusterNotConfigured,
-		Status: corev1.ConditionFalse,
+	crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
+	crc, err = r.updateCrcClusterStatus(logger, crc)
+	if err != nil {
+		return crc, err
 	}
-	crcStatus.Conditions.SetCondition(condition)
 
-	return nil
+	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crcStatus *crcv1alpha1.CrcClusterStatus) error {
+func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
 	output, err := sshClient.Output(`sudo systemctl status kubelet; if [ $? == 0 ]; then echo "__kubelet_running: true"; else echo "__kubelet_running: false"; fi`)
 	if err != nil {
 		logger.Error(err, "Error checking kubelet status in VirtualMachine.")
-		return err
+		return crc, err
 	}
 	fmt.Printf("Kubelet status: %s\n", output)
 
@@ -360,12 +357,12 @@ func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient
 		err := ioutil.WriteFile("/tmp/nameserver", nameserverScript, 0644)
 		if err != nil {
 			logger.Error(err, "Error writing nameserver script.")
-			return err
+			return crc, err
 		}
 		nameserver, err := exec.Command("sh", "/tmp/nameserver").Output()
 		if err != nil {
 			logger.Error(err, "Error finding nameserver of operator pod.")
-			return err
+			return crc, err
 		}
 		fmt.Printf("Nameserver is '%s'\n", nameserver)
 
@@ -422,33 +419,33 @@ sudo systemctl start kubelet
 if [ $? == 0 ]; then
   echo "__kubelet_running: true"
 fi
-`, crcStatus.BaseDomain, nameserver)
+`, crc.Status.BaseDomain, nameserver)
 
 		fmt.Printf("!!! startKubeletScript is:\n\n\n%s\n\n\n", startKubeletScript)
 		output, err := sshClient.Output(startKubeletScript)
 		if err != nil {
 			logger.Error(err, "Error checking kubelet status in VirtualMachine.")
 			fmt.Println(output)
-			return err
+			return crc, err
 		}
 		logger.Info(fmt.Sprintf("Kubelet start output: %s", output))
 		kubeletRunning = strings.Contains(output, "__kubelet_running: true")
 	}
 
 	if !kubeletRunning {
-		return fmt.Errorf("Kubelet not yet running")
+		return crc, fmt.Errorf("Kubelet not yet running")
 	}
 
-	condition := status.Condition{
-		Type:   crcv1alpha1.ConditionTypeKubeletNotReady,
-		Status: corev1.ConditionFalse,
+	crc.SetConditionBool(crcv1alpha1.ConditionTypeKubeletNotReady, false)
+	crc, err = r.updateCrcClusterStatus(logger, crc)
+	if err != nil {
+		return crc, err
 	}
-	crcStatus.Conditions.SetCondition(condition)
 
-	return nil
+	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) initializeStatusConditions(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (reconcile.Result, error) {
+func (r *ReconcileCrcCluster) initializeStatusConditions(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
 	crc.Status.Conditions = status.NewConditions(
 		status.Condition{
 			Type:   crcv1alpha1.ConditionTypeVirtualMachineNotReady,
@@ -472,15 +469,13 @@ func (r *ReconcileCrcCluster) initializeStatusConditions(logger logr.Logger, crc
 		},
 	)
 
-	err := r.client.Status().Update(context.TODO(), crc)
+	crc, err := r.updateCrcClusterStatus(logger, crc)
 	if err != nil {
 		logger.Error(err, "Failed to initialize CrcCluster status.")
-		return reconcile.Result{}, err
+		return crc, err
 	}
 
-	// Status conditions initialized successfully - requeue for
-	// further processing
-	return reconcile.Result{Requeue: true}, nil
+	return crc, nil
 }
 
 func (r *ReconcileCrcCluster) ensureVirtualMachineExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*kubevirtv1.VirtualMachine, error) {
@@ -619,39 +614,36 @@ func (r *ReconcileCrcCluster) ensureIngressExists(logger logr.Logger, crc *crcv1
 	return ingress, nil
 }
 
-func (r *ReconcileCrcCluster) updateVirtualMachineNotReadyCondition(vm *kubevirtv1.VirtualMachine, crcStatus *crcv1alpha1.CrcClusterStatus) {
-	conditionValue := corev1.ConditionTrue
-	if vm.Status.Ready {
-		conditionValue = corev1.ConditionFalse
+func (r *ReconcileCrcCluster) updateVirtualMachineNotReadyCondition(vm *kubevirtv1.VirtualMachine, crc *crcv1alpha1.CrcCluster) {
+	crc.SetConditionBool(crcv1alpha1.ConditionTypeVirtualMachineNotReady, !vm.Status.Ready)
+	if !vm.Status.Ready {
+		// If the VM is no longer ready then we need to reconfigure
+		// everything when it comes back up
+		//
+		// TODO: If we pivot to VMs with persistent disk, this may
+		// need to change
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeKubeletNotReady, true)
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, true)
 	}
-
-	condition := status.Condition{
-		Type:   crcv1alpha1.ConditionTypeVirtualMachineNotReady,
-		Status: conditionValue,
-	}
-	crcStatus.Conditions.SetCondition(condition)
 }
 
-func (r *ReconcileCrcCluster) updateNetworkingNotReadyCondition(svc *corev1.Service, crcStatus *crcv1alpha1.CrcClusterStatus) {
-	conditionValue := corev1.ConditionTrue
-	if svc.Spec.ClusterIP != "" && crcStatus.APIURL != "" {
-		conditionValue = corev1.ConditionFalse
+func (r *ReconcileCrcCluster) updateNetworkingNotReadyCondition(svc *corev1.Service, crc *crcv1alpha1.CrcCluster) {
+	if svc.Spec.ClusterIP != "" && crc.Status.APIURL != "" {
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeNetworkingNotReady, false)
+	} else {
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeNetworkingNotReady, true)
 	}
-
-	condition := status.Condition{
-		Type:   crcv1alpha1.ConditionTypeNetworkingNotReady,
-		Status: conditionValue,
-	}
-	crcStatus.Conditions.SetCondition(condition)
 }
 
-func (r *ReconcileCrcCluster) updateCredentials(crcStatus *crcv1alpha1.CrcClusterStatus) {
-	if crcStatus.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) &&
-		crcStatus.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeNetworkingNotReady) {
+func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) {
+	if crc.Status.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) &&
+		crc.Status.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeNetworkingNotReady) {
 
-		crcStatus.KubeAdminPassword = "DEP6h-PvR7K-7fYqe-IhLUP"
+		crc.Status.KubeAdminPassword = "DEP6h-PvR7K-7fYqe-IhLUP"
 
-		crcStatus.Kubeconfig = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`apiVersion: v1
+		// TODO: This certificate-authority-data doesn't match the
+		// actual cert the user gets when they hit the api server
+		crc.Status.Kubeconfig = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`apiVersion: v1
 clusters:
 - cluster:
     certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM3VENDQWRXZ0F3SUJBZ0lCQVRBTkJna3Foa2lHOXcwQkFRc0ZBREFtTVNRd0lnWURWUVFEREJ0cGJtZHkKWlhOekxXOXdaWEpoZEc5eVFERTFPVEV6TlRneE5UTXdIaGNOTWpBd05qQTFNVEUxTlRVeVdoY05Nakl3TmpBMQpNVEUxTlRVeldqQW1NU1F3SWdZRFZRUUREQnRwYm1keVpYTnpMVzl3WlhKaGRHOXlRREUxT1RFek5UZ3hOVE13CmdnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURTOUtJNFhUZHJRblMvTkdGS2thTGcKZStvdmEwSWxHYjNsbE5QVnJnZTBwdlNGNTRUakFUQlpOc2hOekRQN1huVkRYUFZ0VlU4OXNMTHZjZDJDSHFLaApSR1pHdnFCMGJlTmowZ2dnTlNWU3RBc1NCUSt2Smp2TTN2bS91R25nR3FxZGdXcUdPbGV1YUoxUlNTZUZwa2VLCmIvMGttbFZWRStoUHVZbXFjL1ErditiU0w0Um5Fb2pSRGU2QzdtZ2U4M2pGd0xmTjJjR3dpVjFjUG9kZFgrVEYKb2F5Y0xVaEh0SjZnTVN6SkZ1c1Z4Z3RPOFpRdkR1UXRPQ0ZLVUhWS2NDM3JpR096VUE3WkxxMWF3ZzRVRmJJTgoxODl4QkhPRnNlZWE5RjRXckZJWXBEZVF6a3BUeHJ2VnBuZ2wyRkZ3eGNTU1hLL0Y2WFZtY3g1SFNnZEsrY3pCCkFnTUJBQUdqSmpBa01BNEdBMVVkRHdFQi93UUVBd0lDcERBU0JnTlZIUk1CQWY4RUNEQUdBUUgvQWdFQU1BMEcKQ1NxR1NJYjNEUUVCQ3dVQUE0SUJBUUJlMjZmUnFsZFhFdE5mWEdYaVhtYStuaVhnMmRtQ2g2azdXYUNrMkdGNgpHbHhZMDNkcmNYeXpwUzRTT2Rac2VqaVBwVU9ubTgwdnZBai9LaWZmakxDUDIvUDBUT2w3cCtlNTBFbGFaZVIvCjMxRjRDMzdZYW5VbFV3YVVUblFtUXRSd002Szl2QWRiRUZ5SWVHV1AraU04TFFFUnRYRXA4M0tJS1BQbjVPd2YKNjBrUXBLSWRKL2ttR3pwRUllS0FVTmpITTgyM01JU3FZd21yVDN3elBmankxZEpyeUtXNGdLazZTVmJqVUZXTwp6UFpyMVk0Tmd0aG5HSFRvbnhNYWkxRDhZa2cvM3k0TWt3Q3FKWHk0ZlJEdnRpMklMaG5xNWx4RExzOThwaU1BCmRhMVdveWNHSlNWdHYySHkwKzg2amNFelo3T01mRGllSnRRdVpaUzgrdjVKCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0KLS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM3VENDQWRXZ0F3SUJBZ0lCQVRBTkJna3Foa2lHOXcwQkFRc0ZBREFtTVNRd0lnWURWUVFEREJ0cGJtZHkKWlhOekxXOXdaWEpoZEc5eVFERTFPVEV6TlRneE5UTXdIaGNOTWpBd05qQTFNVEUxTlRVeVdoY05Nakl3TmpBMQpNVEUxTlRVeldqQW1NU1F3SWdZRFZRUUREQnRwYm1keVpYTnpMVzl3WlhKaGRHOXlRREUxT1RFek5UZ3hOVE13CmdnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURTOUtJNFhUZHJRblMvTkdGS2thTGcKZStvdmEwSWxHYjNsbE5QVnJnZTBwdlNGNTRUakFUQlpOc2hOekRQN1huVkRYUFZ0VlU4OXNMTHZjZDJDSHFLaApSR1pHdnFCMGJlTmowZ2dnTlNWU3RBc1NCUSt2Smp2TTN2bS91R25nR3FxZGdXcUdPbGV1YUoxUlNTZUZwa2VLCmIvMGttbFZWRStoUHVZbXFjL1ErditiU0w0Um5Fb2pSRGU2QzdtZ2U4M2pGd0xmTjJjR3dpVjFjUG9kZFgrVEYKb2F5Y0xVaEh0SjZnTVN6SkZ1c1Z4Z3RPOFpRdkR1UXRPQ0ZLVUhWS2NDM3JpR096VUE3WkxxMWF3ZzRVRmJJTgoxODl4QkhPRnNlZWE5RjRXckZJWXBEZVF6a3BUeHJ2VnBuZ2wyRkZ3eGNTU1hLL0Y2WFZtY3g1SFNnZEsrY3pCCkFnTUJBQUdqSmpBa01BNEdBMVVkRHdFQi93UUVBd0lDcERBU0JnTlZIUk1CQWY4RUNEQUdBUUgvQWdFQU1BMEcKQ1NxR1NJYjNEUUVCQ3dVQUE0SUJBUUJlMjZmUnFsZFhFdE5mWEdYaVhtYStuaVhnMmRtQ2g2azdXYUNrMkdGNgpHbHhZMDNkcmNYeXpwUzRTT2Rac2VqaVBwVU9ubTgwdnZBai9LaWZmakxDUDIvUDBUT2w3cCtlNTBFbGFaZVIvCjMxRjRDMzdZYW5VbFV3YVVUblFtUXRSd002Szl2QWRiRUZ5SWVHV1AraU04TFFFUnRYRXA4M0tJS1BQbjVPd2YKNjBrUXBLSWRKL2ttR3pwRUllS0FVTmpITTgyM01JU3FZd21yVDN3elBmankxZEpyeUtXNGdLazZTVmJqVUZXTwp6UFpyMVk0Tmd0aG5HSFRvbnhNYWkxRDhZa2cvM3k0TWt3Q3FKWHk0ZlJEdnRpMklMaG5xNWx4RExzOThwaU1BCmRhMVdveWNHSlNWdHYySHkwKzg2amNFelo3T01mRGllSnRRdVpaUzgrdjVKCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0KLS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURRRENDQWlpZ0F3SUJBZ0lJTGlKYklDbE9RaEl3RFFZSktvWklodmNOQVFFTEJRQXdQakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TZ3dKZ1lEVlFRREV4OXJkV0psTFdGd2FYTmxjblpsY2kxc2IyTmhiR2h2YzNRdApjMmxuYm1WeU1CNFhEVEl3TURZd05URXhNVGcxTlZvWERUTXdNRFl3TXpFeE1UZzFOVm93UGpFU01CQUdBMVVFCkN4TUpiM0JsYm5Ob2FXWjBNU2d3SmdZRFZRUURFeDlyZFdKbExXRndhWE5sY25abGNpMXNiMk5oYkdodmMzUXQKYzJsbmJtVnlNSUlCSWpBTkJna3Foa2lHOXcwQkFRRUZBQU9DQVE4QU1JSUJDZ0tDQVFFQTdMQXlHY3NiaUc1OApDSzRUUUZQQ3cwVUc3ems0SVhTTDlKV0U1SjlMUHQycW12azdjR2hLTnlGL0NIZElodk0zY2tZM2dLcnhkSlZMCjhLWnJYbUxnRVlXM1hUYzFMWjc5TG5UQmt0RWFVMTFvVU1kMkVFaUh2WFVrSFJKaUNNNzFhOTZQOEFkZUZFQloKNEhnQkR5V3ZGcUFFWWlpSnc4M1hxYUVNdXBGUDJFM0ZTTjEra291Sk9BbE1OaDZHcEdvdVlNMGlMek5SKzVtSQpvRFdKUW92bk9OWlorb0l0MDBEQ1kwZHA5V3FqWEhGSzZuNmg5QXNldG4yS0dmZkVKS2ZoQzdOWDBnRW9yK1dICk5wa3Z6SG4wRjlaSkRjUGtoYm0vcHM0TGdDcWdMalBhTkR3RTFsMmZBNjkwTkJJZVZtQ0gxaGZ2SlhYM0ozbzEKVkV4UC80T3gzd0lEQVFBQm8wSXdRREFPQmdOVkhROEJBZjhFQkFNQ0FxUXdEd1lEVlIwVEFRSC9CQVV3QXdFQgovekFkQmdOVkhRNEVGZ1FVM2NCcEsrb2wweTFmZ211UUhnTE1xeDRFNW9Bd0RRWUpLb1pJaHZjTkFRRUxCUUFECmdnRUJBRFF5QkI0eUNjYjBvZmtpODZCU2piODJydVc2ckFoWVQ0cTljZnJWY2ZhdEs0ZURxSFAzMWROQTdRUmEKeFdmbCtsMFd6dkVmT2dVOGMxUDhSRE1NampubitteDdobnZOaUgwQ0xnL3R1RUFmRlZzZFZKYlNqMk5rZTAxRwpTN09RUkVmOGJkQklucmNkM0xiYThMU084MDhic0V0WmdnZG13RndBUWsvdWRYN1d2SUlQVkppeTZCeGpWZ0FWClJYaDZFcUxQaUlWTDJ3b0YwVGNHSXpGNE5UMlUzcWNLM2NKdUVjM1lzdkkrck1tWEJDT25FY0N2MzB2a1d0NmsKNnV4cEdOWGxidlRxekZTY3NZL09zZEVUeGpBVHhxTUEzZ2FLR000OTFnM3REUXhaUVNNRlJTMjRMYlFhSjJDQgpFbWUzMFhlempvdTNUNytyVWx1S1dCd3luUzg9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0KLS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURURENDQWpTZ0F3SUJBZ0lJTUwzZTJ4ZG9Xd0F3RFFZSktvWklodmNOQVFFTEJRQXdSREVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TNHdMQVlEVlFRREV5VnJkV0psTFdGd2FYTmxjblpsY2kxelpYSjJhV05sTFc1bApkSGR2Y21zdGMybG5ibVZ5TUI0WERUSXdNRFl3TlRFeE1UZzFOVm9YRFRNd01EWXdNekV4TVRnMU5Wb3dSREVTCk1CQUdBMVVFQ3hNSmIzQmxibk5vYVdaME1TNHdMQVlEVlFRREV5VnJkV0psTFdGd2FYTmxjblpsY2kxelpYSjIKYVdObExXNWxkSGR2Y21zdGMybG5ibVZ5TUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQwpBUUVBeDNGL3pVd0tZanMvSDZIaG9NWWxqamlRVDg0eklMOGVTVmZGVEZJMVUwZVcxbDV1akp2Wlk3bDRnZyt3CmlybEtFRUtoWmtXNUpWbEZwaVpxbW8yR0lPc3JJWGoxL0Fpc1VVcWdXUUtEWHVDUnhWNitCeE5xM1Z6d1VJUDYKNDA4L2o4Z0tPZGp6NVRTTFUwa0VIYmVLc0FYYmNZSUVYQXorTDBEdFo4WWx0NnpJc2hjaCs0RGxMUDR3R0NVMAowNWx3d2dEcUZUOE1lUEhzb0pISFRTcDFxT0V4Z2E5bjBzTGMxTGFXUkJabzBGMmNleWVqdy95bUlwUkNpVHc4CmZvR0cwYm4ydWZFOG9TWkRpMUZSa0JJQ2puNWlLdlkxNFR0VVpCN2RiMXFlZmZ5MStmZThJTElRdEphcStVaDkKL3R2QnUyYVJITlQyWnV1MUNvRDNlaWhqdlFJREFRQUJvMEl3UURBT0JnTlZIUThCQWY4RUJBTUNBcVF3RHdZRApWUjBUQVFIL0JBVXdBd0VCL3pBZEJnTlZIUTRFRmdRVXJpbGxEUHhFVHFQbVVuUHZrWTArSVBvYXErTXdEUVlKCktvWklodmNOQVFFTEJRQURnZ0VCQU1TTExxR0NObmhEZUhScWtaUWEvNktUR21KZVpEc1F3MURHRUpYc1VMVloKcXpRODFjZUtreEVDQVByK2hzcmRORVB6bEhDbUpGQXVYczBXQ0lRN1NvaUNJcmYzQnV6cVNIK2QxME9sZjlkdApXS1lSTmg1UXVaODgxWWhDNDZsZ3hZVjk5RjU3WW5ROG8rellaN2ZDUTMreGRGbytudXNRYys4K2tQM1VGcUJtCjd4Q2V2MmtJUm1RT005c05WUTcrdnBkb2I2dTJwN1VLSFplQmd6Q2h2ODhXclF4M2lIOUlob2J5bnkyREk1Y1UKS1BQbWNVQlY1Y2pualZkVVp2SW1wNDVqcEwvWUNLam5OQjNWNmVOQ2ROSnozZWh4Y3B2bFFMdVgycUhGdzdGTQozRWU1UlRMbnl6SEFTVFQramRJQUVvUUpTSnNHNFJiZ0g3WDVZd2laVDI0PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCi0tLS0tQkVHSU4gQ0VSVElGSUNBVEUtLS0tLQpNSUlETWpDQ0FocWdBd0lCQWdJSUczR3l1WWpVaU9nd0RRWUpLb1pJaHZjTkFRRUxCUUF3TnpFU01CQUdBMVVFCkN4TUpiM0JsYm5Ob2FXWjBNU0V3SHdZRFZRUURFeGhyZFdKbExXRndhWE5sY25abGNpMXNZaTF6YVdkdVpYSXcKSGhjTk1qQXdOakExTVRFeE9EVTJXaGNOTXpBd05qQXpNVEV4T0RVMldqQTNNUkl3RUFZRFZRUUxFd2x2Y0dWdQpjMmhwWm5ReElUQWZCZ05WQkFNVEdHdDFZbVV0WVhCcGMyVnlkbVZ5TFd4aUxYTnBaMjVsY2pDQ0FTSXdEUVlKCktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU03K1J1Y3pEWUpXVjAvK1FHaHNuTUUrV2dlcUJERS8KNDkrSUkyUEttL01rV0NDTlRYNU1yM05mZ0RKSDlMRDBRRzZMZlc3Q0lVWFZjeWZ4ZDd1WVNETERwVmJJSVRyQgpoa1g0WmdtQTd6d09RcUQ4SElhZUp0QmJ5ZnhaWFpBbkNoSlVMU2JscDFYa2NnTEVlVm5hTHZwOVF6QkpCOHRDCmRPczRqbFpkSmRXcm9GYlZJUUVJRHBYT0k4L0diY0dZTXd6cXRiNFRzUVFzNWZ6MG5FVlI0eXoveE9wN0xRQ1EKbVlwWER4cUhFbzVXb0w1Vk5YSGZmWUVRRE9WeVlTeDNEL21FYkd1QzNrUWdXd3F1LzFZeU1sbkFVN2djbDNMWQovSFg1bVRmSVRKVG1VKzJlOHFoNHZMTEVMckVVU2E4alVzR1cyUHIvSmx1NklPei9kR3d0OTdVQ0F3RUFBYU5DCk1FQXdEZ1lEVlIwUEFRSC9CQVFEQWdLa01BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0hRWURWUjBPQkJZRUZDR0UKcmpMWk1wNk41a202NWZZUWVQalNnaDVqTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFCMm1LVVRqNi9WUG5VRQoyeUI3NEtPQ3VBaldkU1JrVHpGU3JCNTFmZHBkQmZJSU1mRDRYai9ZRUkxSDZQQ2dZS2lzbWpaRUJ1QVNHQzNBCnNUNjBCVDFJQmFERG9PeWlOelhUUFdTRlVEUkFYeUYzWkJrVGlYM2JjTU9WRzI3VDBXRVRLU1Y3Q2N3N0pPcWEKSXJpQkJpc25RVUlhV0R3SnhEdm5ZUXNBendOWWVBNjRzdDhHNkRWaVF1ZkV1SFpBT0VUYXo5ek55NnNhd2ErUApjUUxVZTFsaVFSNk1EWjhGY2tPL1UxNURyeE16MVBJeUNiRW43LzVGVzFsL0lENkZBM05MQ3Yxa1hvTVdXd0dVCmpIYzRQMmZzVHBGbStGODNsdDlDcCtQWU92N1Jkdm1QQytUTSs1NW45djVES2p1SkVBZWtyNUdsN0NZcVJxaU8KTjdXdzNMc0YKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
@@ -670,7 +662,7 @@ users:
   user:
     client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURaekNDQWsrZ0F3SUJBZ0lJTW9yOCtncGEwWGd3RFFZSktvWklodmNOQVFFTEJRQXdOakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TQXdIZ1lEVlFRREV4ZGhaRzFwYmkxcmRXSmxZMjl1Wm1sbkxYTnBaMjVsY2pBZQpGdzB5TURBMk1EVXhNVEU0TlRWYUZ3MHpNREEyTURNeE1URTROVFZhTURBeEZ6QVZCZ05WQkFvVERuTjVjM1JsCmJUcHRZWE4wWlhKek1SVXdFd1lEVlFRREV3eHplWE4wWlcwNllXUnRhVzR3Z2dFaU1BMEdDU3FHU0liM0RRRUIKQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURzUHE3VDZWNS9JeWwzSlR6ais2REg4aFZqR0tGUWZGS3dya3l0NTNLNwprbHVKbXF1WXpIUDUwSHg5RDc2V2FVM0V5cmZJNWl1MElFOFhiQXcvUittT2M3QWErOHJqTWliVFc0UHFsSVZ3CkFNQTlLOExybG5HVnJvdmlaQ0Z3QmMwM0dZSUVKUENJZno4K25aQzhzSkswbEZteVY1SkY3NDdMY0RyTENTdVkKQnJEemdibWJOcTVjWndQVCsvUHMrZ283T3Q3dXlod25obndmeisyUmxBWFpsMk0zN25SY0ZJOGdBanM1Zjg1UgpNRTJNZk5jVHZLLzFXWThZREZSQ2ZNREtiUXNPR0NWUzFyRFd6MGIxaVJRS3JIVFdSWkNXczBXQWs0SmROODhuClRFdFZCcWtaZEp2dGxRY2dCR3pkMWg2WTVFWVZmOUM3ajlwdHdDc2YwaGozQWdNQkFBR2pmekI5TUE0R0ExVWQKRHdFQi93UUVBd0lGb0RBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEQVlEVlIwVApBUUgvQkFJd0FEQWRCZ05WSFE0RUZnUVVZRFJXeVRpWUJqUlo2bHppQkxuUEFPM05ZZE13SHdZRFZSMGpCQmd3CkZvQVVHcUJLNmR2Wno1MUhlcjgvUEhPOC95cElydlV3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUR6WUdjc3MKaUpOYm1wbHdSUk15cHF2UWMvdCtTcXk4cUhrU2xWSnpwMFN5d3RLVnFKTGh4VXRhZlBpVmlkQlFJZjdFVkZRMApQRG1FdXJidkJWSDNPWUtRZTlmdks1cVdjYmdsenFRS1hwcUxLaElvQ3V5VHZ2azNmT0xDMmdyYjNJTGx1WDlwCnBMVE9YbjV0akR6NlNsSTJYNnB6SjdpZGIvdHJtaVdDYWlNdmNkQ0Qrc0VMUGZzS0h5QWZZZ3RONk9zQ2hxTFYKcHYwRnQwRVZ4dnlFMzc5TkdnWnhyM3doWktGYjJRUFBWRWRVcGZPOFRpRnpWRWFueCtIdWxCZjVkWm1ZMUtmago3TU0xYmtoWUhqcFFyWEhWK2YyVHZLS0FRZHh4SlErODlCajlFK0YrSXl6djlyMFdQZ3JITXJUbTlzYjJpVGllCm9hcnVaZU9GYVJVUS8vTT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
     client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBN0Q2dTArbGVmeU1wZHlVODQvdWd4L0lWWXhpaFVIeFNzSzVNcmVkeXU1SmJpWnFyCm1NeHorZEI4ZlErK2xtbE54TXEzeU9ZcnRDQlBGMndNUDBmcGpuT3dHdnZLNHpJbTAxdUQ2cFNGY0FEQVBTdkMKNjVaeGxhNkw0bVFoY0FYTk54bUNCQ1R3aUg4L1BwMlF2TENTdEpSWnNsZVNSZStPeTNBNnl3a3JtQWF3ODRHNQptemF1WEdjRDAvdno3UG9LT3pyZTdzb2NKNFo4SDgvdGtaUUYyWmRqTis1MFhCU1BJQUk3T1gvT1VUQk5qSHpYCkU3eXY5Vm1QR0F4VVFuekF5bTBMRGhnbFV0YXcxczlHOVlrVUNxeDAxa1dRbHJORmdKT0NYVGZQSjB4TFZRYXAKR1hTYjdaVUhJQVJzM2RZZW1PUkdGWC9RdTQvYWJjQXJIOUlZOXdJREFRQUJBb0lCQUNlSWljc09kM0RCR3BSRQpsLzd5d2NJVDRiNVdoZEFwTGRGQktiWEVVRy9SR3g1WTByUmNLbUE0b2t4dlVRNXNpc1lPd2xpTkkrMGRwdjZkClp5TkR6bkszSzFZb29wZ0ljWFRYRUtrMXQycTV4WEczSEFRK2hiMXRteDBFY3BBRGVJYnE3dFh3dEl1eTk0dHIKNUtlZXlMNE5RVUZWNURWdDFEQjVGRzJibUQ3MU5XRW5KNFhncTUxNUxkY2VUS1dBbm92NURmbmVNcXJqU21oUgpHeHV4RnorbVZyeUowUVIyL3JZY1l5cWRsZFJKQ2REcFdGRndSdDRVbmlLaHVHdEhGZlpTU2ZYU2QvYmhRbnUwCmtmbWh5OFlMMFpURUkvSE9pVWdBUzhFUHVWbWhsbmRESkwxY2ZoRUJNaFQvYXd1TDYvQklZS3gyWWJNTmpjZUUKbjdwVzlRa0NnWUVBK045enRRU296Z3JBYWwyV1Z1ei9rWENsMzlmd0VjZFpaUXV2b2MxaU5ZU1NtUzVLanFtbQpjSmRGNFd6bG0yUUJnUllFT044RE1vL3RQNmF3MmFiYjQ4SW1FYlRjKzFodzJBUThHSGpYNXlqTFkvM0VrT1FxCi9QNWE3QXFhbU9udS83TnplU1FYZERwQzhiWnZsNm5wdkVzallEZi95dWVnVmR6VmRMSktDK01DZ1lFQTh3S20KNWE1NTNDa2I5YUxXbVFOUGFqd25ZVXRHaG5EQUhvaThEV0E4ZTVxYzg1MHRSNTBBVDVNazhYVUF0YjRJbFkvUgpVS3FYY3U0blU5Tk9rYmVndmJoZWZ6ZDNyR0xPQkdlQUhqWmptUTV0T1hMT1Z4SVFJdElvRVBVTGtSclJrRDB2CjF5eVdZYXdhQXlka213Nk5haEowbldQRUxnbU1TcXlqZlBWMnN0MENnWUVBamJ0Yi91d3ZZbUFYSXJ3M29UdUoKZEgrdHg2UUhrV2h4VGExeEVYbVJBNStEaVg4bWNNYkhCZm53anlmZ1B6V2Q4YkRqS0t4QSt1dWlsb3hNelRkTQpwUkh0Y2tvSlM0OGJmTG8wcTA4dXpmT2FtVkJ0UUlMZ3hJSHFyK0IrR0xXcEtiQStBL0I4OXZFekxNclVGSkJzCmo1SlBERDM0QzhzTHNicDVTZU03YmpjQ2dZRUEzSmVFcnl4QnZHT28yTUszc1BCN1Q0RkpjaDFsNkxaQy83UzUKbUI3SzZKMENhblk4V3l5ZTBwMU14TTZrRlZacTduRTkzYzd0YWN2YjhWRDRtbmdwTnU4OUFKaDJUd3JsM3NPaApYa3VhLzU1RDhnbFFXMk92T0J5emVDa3BGZEJWZVd6Qmw3OEd4NlQxZS9WdmN2Mnp5eHp6dE1lU2x3UGQwUStECjNQUHBpeFVDZ1lBRVE5VFI4Z0s0V0NuTUxWSUxzWGZUUlVEdjRram9Ob3prT0JwVG5nejN4T0dRNW9vajNMVm0KTEtJU1VTeU15SkJNRCtNU2dnMVd1SkEzYUdGTWdMcndnRS9HaXQvTEtjaW8rMjFUVjdUQUtsZWJJMGd5SFdGbgpRSEtmOWVrTTl3Ym5xa0VPUmJ1cUJ0UUxsTWJjeXI0cHF0V3FjU3lkd1M5czllL2hTaGVCMWc9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
-`, crcStatus.APIURL)))
+`, crc.Status.APIURL)))
 	}
 }
 

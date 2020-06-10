@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/code-ready/machine v0.0.0-20191122132905-c31e0b90623d
 	github.com/go-logr/logr v0.1.0
+	github.com/google/uuid v1.1.1
 	github.com/openshift/api v0.0.0-20191219222812-2987a591a72c
 	github.com/operator-framework/operator-sdk v0.18.0
 	github.com/spf13/pflag v1.0.5

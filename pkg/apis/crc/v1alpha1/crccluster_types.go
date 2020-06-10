@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"github.com/operator-framework/operator-sdk/pkg/status"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -59,10 +60,14 @@ type CrcClusterStatus struct {
 	BaseDomain string `json:"baseDomain,omitempty"`
 
 	// APIURL is the URL of the cluster's API server
-	APIURL string `json:"apiUrl,omitempty"`
+	APIURL string `json:"apiURL,omitempty"`
 
 	// ConsoleURL is the URL of the cluster's web console
-	ConsoleURL string `json:"consoleUrl,omitempty"`
+	ConsoleURL string `json:"consoleURL,omitempty"`
+
+	// ClusterID is the ID of this cluster, only really used if
+	// connected cluster features are enabled
+	ClusterID string `json:"clusterID,omitempty"`
 
 	// Kubeconfig is the base64-encoded kubeconfig to connect to the
 	// cluster as an administrator
@@ -100,4 +105,17 @@ type CrcClusterList struct {
 
 func init() {
 	SchemeBuilder.Register(&CrcCluster{}, &CrcClusterList{})
+}
+
+// SetConditionBool is a helper function to set boolean Conditions
+func (crc *CrcCluster) SetConditionBool(conditionType status.ConditionType, value bool) {
+	conditionValue := corev1.ConditionFalse
+	if value {
+		conditionValue = corev1.ConditionTrue
+	}
+	condition := status.Condition{
+		Type:   conditionType,
+		Status: conditionValue,
+	}
+	crc.Status.Conditions.SetCondition(condition)
 }

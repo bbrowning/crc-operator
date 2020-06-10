@@ -53,7 +53,7 @@ export KUBECONFIGFILE="kubeconfig-${VM_NAME}-${VM_NAMESPACE}"
 
 dlog "> Looking up API server"
 while [ -z "${CRC_API_SERVER}" ]; do
-  export CRC_API_SERVER=$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.apiUrl} || echo '')
+  export CRC_API_SERVER=$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.apiURL} || echo '')
 done
 
 dlog "> Looking up kubeconfig"
@@ -244,7 +244,7 @@ if [ "true" == "$DEBUG" ]; then
   ${OCCRC} get pod --all-namespaces
 fi
 
-CRC_CONSOLE="https://$(${OCCRC} get route -n openshift-console console -o jsonpath={.spec.host})"
+CRC_CONSOLE="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.consoleURL})"
 KUBEADMIN_PASSWORD="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.kubeAdminPassword})"
 
 log "> CRC cluster is up!
