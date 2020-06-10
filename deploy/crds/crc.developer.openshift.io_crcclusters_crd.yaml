@@ -32,12 +32,31 @@ spec:
             type: object
           spec:
             description: CrcClusterSpec defines the desired state of CrcCluster
+            properties:
+              cpu:
+                default: 4
+                description: CPU is the number of CPUs to allocate to the cluster
+                type: integer
+              memory:
+                default: 12Gi
+                description: Memory is the amount of memory to allocate to the cluster
+                type: string
+              pullSecret:
+                description: PullSecret is your base64-encoded OpenShift pull secret
+                type: string
+            required:
+            - cpu
+            - memory
+            - pullSecret
             type: object
           status:
             description: CrcClusterStatus defines the observed state of CrcCluster
             properties:
               apiUrl:
                 description: APIURL is the URL of the cluster's API server
+                type: string
+              baseDomain:
+                description: BaseDomain is the base domain of the cluster's URLs
                 type: string
               conditions:
                 description: Conditions represent the latest available observations
@@ -88,8 +107,8 @@ spec:
                   as an administrator
                 type: string
               kubeconfig:
-                description: Kubeconfig is the kubeconfig to connect to the cluster
-                  as an administrator
+                description: Kubeconfig is the base64-encoded kubeconfig to connect
+                  to the cluster as an administrator
                 type: string
             required:
             - conditions

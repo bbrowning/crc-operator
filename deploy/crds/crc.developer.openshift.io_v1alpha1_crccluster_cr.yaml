@@ -2,4 +2,7 @@ apiVersion: crc.developer.openshift.io/v1alpha1
 kind: CrcCluster
 metadata:
   name: my-cluster
-spec: {}
+spec:
+  cpu: 4
+  memory: 16Gi
+  pullSecret: your pull secret here

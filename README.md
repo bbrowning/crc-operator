@@ -40,10 +40,7 @@ on OpenShift or
 [KubeVirt](https://kubevirt.io/user-guide/#/installation/installation)
 (on Kubernetes).
 
-### Operator Deployment of CRC Clusters
-
-The operator is a work-in-progress. At the moment, the scripted
-deployment below is more complete and reliable. But, if you're brave:
+### Deploy the operator
 
 Create the CrcCluster CRD
 
@@ -51,19 +48,27 @@ Create the CrcCluster CRD
 oc apply -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
 ```
 
-Run the operator locally
+Deploy the operator
 
 ```
-operator-sdk run local --watch-namespace=""
+oc create ns crc-operator
+oc apply -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
+oc apply -f deploy/service_account.yaml
+oc apply -f deploy/role.yaml
+oc apply -f deploy/role_binding.yaml
+cat deploy/operator.yaml | sed 's|REPLACE_IMAGE|quay.io/bbrowning/crc-operator:v0.0.1|g' | oc apply -f -
 ```
 
-Create a CrcCluster CR
+Ensure the operator comes up with no errors in its logs
 
 ```
-oc apply -f deploy/crds/crc.developer.openshift.io_v1alpha1_crccluster_cr.yaml
+oc logs deployment/crc-operator -n crc-operator
 ```
 
-### Scripted Deployment of CRC Clusters
+## Create a CRC cluster
+
+The operator is still a work-in-progress, so for now you'll need the
+helper `crcStart.sh` script to actually get a CRC cluster up.
 
 Clone this repo, copy your OpenShift pull secret into a file called
 `pull-secret`, and run the commands below. You can substitute any name
@@ -72,12 +77,41 @@ place of `crc` in the commands below.
 
 ```
 oc new-project crc
-./crcStart.sh my-cluster crc pull-secret
+DEBUG=true ./crcStart.sh my-cluster crc pull-secret
+```
+
+If the script hangs, fails, or otherwise something broke check the
+known issues below to see if there's a workaround. The script is still
+pretty brittle at the moment and things will be far more reliable once
+everything is ported into the operator code.
+
+
+After you have a cluster up, there's another helper script that will
+ensure all OpenShift Routes in your CRC cluster get a corresponding
+Route/Ingress in the parent cluster so they work end-to-end.
+
+This is another hack until the functionality gets put into this or
+some other operator. We'll likely need one pod per CRC cluster started
+to monitor the Routes inside that cluster and shuffle things back to
+the parent. This script runs forever, monitoring your cluster. CTRL+C
+it to stop monitoring Routes.
+
+```
+./copyRoutes.sh my-cluster crc
 ```
 
 # Development
 
 For developer crc-operator itself, see [DEVELOPMENT.md]().
+
+# Known Issues
+
+- Sometimes the openshift-apiserver pod needs a second restart to
+  unstick the `crcStart.sh` script - if its logs have a bunch of x509
+  errors then it needs a kicking.
+- The kubeconfigs have an incorrect certificate-authority-data that
+  needs to get updated to match the actual cert from the running
+  cluster. Should that have changed? May be unintentional...
 
 # Other Notes Below
 
