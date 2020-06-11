@@ -111,7 +111,11 @@ For developer crc-operator itself, see [DEVELOPMENT.md]().
   errors then it needs a kicking.
 - The kubeconfigs have an incorrect certificate-authority-data that
   needs to get updated to match the actual cert from the running
-  cluster. Should that have changed? May be unintentional...
+  cluster. Should that have changed? Look at
+  https://docs.openshift.com/container-platform/4.4/authentication/certificates/api-server.html
+  for how to add an additional API server certificate with the proper
+  name. The operator would need to generate a new cert for the exposed
+  API server URL and follow those instructions.
 
 # Other Notes Below
 

@@ -258,32 +258,41 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{}, err
 	}
 
+	insecureCrcK8sConfig := rest.CopyConfig(crcK8sConfig)
+	insecureCrcK8sConfig.Insecure = true
+	insecureCrcK8sConfig.CAData = []byte{}
+	insecureK8sClient, err := kubernetes.NewForConfig(insecureCrcK8sConfig)
+	if err != nil {
+		reqLogger.Error(err, "Error generating Kubernetes client from REST config.")
+		return reconcile.Result{}, err
+	}
+
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
 		reqLogger.Info("Updating pull secret in CrcCluster.")
-		if err := r.updatePullSecret(crc, sshClient, k8sClient); err != nil {
+		if err := r.updatePullSecret(crc, sshClient, insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error updating pull secret in CrcCluster.")
 			return reconcile.Result{}, err
 		}
 
 		reqLogger.Info("Updating clusterID in CrcCluster.")
-		crc, err = r.updateClusterID(crc, k8sClient)
+		crc, err = r.updateClusterID(crc, insecureCrcK8sConfig)
 		if err != nil {
 			reqLogger.Error(err, "Error updating clusterID in crcCluster.")
 			return reconcile.Result{}, err
 		}
 
-		if !r.hasRequestHeaderClientCA(k8sClient) {
+		if !r.hasRequestHeaderClientCA(insecureK8sClient) {
 			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
 		}
 
 		reqLogger.Info("Restarting OpenShift APIServer in CrcCluster.")
-		if err := r.restartOpenShiftAPIServer(k8sClient); err != nil {
+		if err := r.restartOpenShiftAPIServer(insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error restarting OpenShift API server.")
 			return reconcile.Result{}, err
 		}
 
 		reqLogger.Info("Waiting on OpenShift APIServer to stabilize.")
-		stable, err := r.waitForOpenShiftAPIServer(k8sClient)
+		stable, err := r.waitForOpenShiftAPIServer(insecureK8sClient)
 		if err != nil {
 			reqLogger.Error(err, "Error waiting on OpenShift API server to stabilize.")
 			return reconcile.Result{}, err
@@ -293,10 +302,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 
 		reqLogger.Info("Approving CSRs.")
-		if err := r.approveCSRs(k8sClient); err != nil {
+		if err := r.approveCSRs(insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error approving CSRs.")
 			return reconcile.Result{}, err
 		}
+
+		fmt.Printf("blah blah k8sClient %v\n", k8sClient)
 
 		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
 		crc, err = r.updateCrcClusterStatus(crc)
@@ -368,7 +379,10 @@ sudo chmod 0600 /var/lib/kubelet/config.json
 	if err != nil {
 		return err
 	}
-	crcPullSecretBytes := []byte(crc.Spec.PullSecret)
+	crcPullSecretBytes, err := base64.StdEncoding.DecodeString(crc.Spec.PullSecret)
+	if err != nil {
+		return err
+	}
 	existingPullSecretBytes, found := secret.Data[".dockerconfigjson"]
 	if !found || !bytes.Equal(existingPullSecretBytes, crcPullSecretBytes) {
 		secret.Data[".dockerconfigjson"] = crcPullSecretBytes
@@ -379,7 +393,7 @@ sudo chmod 0600 /var/lib/kubelet/config.json
 	return nil
 }
 
-func (r *ReconcileCrcCluster) updateClusterID(crc *crcv1alpha1.CrcCluster, k8sClient *kubernetes.Clientset) (*crcv1alpha1.CrcCluster, error) {
+func (r *ReconcileCrcCluster) updateClusterID(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) (*crcv1alpha1.CrcCluster, error) {
 	if crc.Status.ClusterID == "" {
 		clusterID, err := uuid.NewRandom()
 		if err != nil {
@@ -392,9 +406,11 @@ func (r *ReconcileCrcCluster) updateClusterID(crc *crcv1alpha1.CrcCluster, k8sCl
 		}
 	}
 
-	configClient := configv1Client.New(k8sClient.CoreV1().RESTClient())
-	clusterVersionName := "config"
-	clusterVersion, err := configClient.ClusterVersions().Get(clusterVersionName, metav1.GetOptions{})
+	configClient, err := configv1Client.NewForConfig(restConfig)
+	if err != nil {
+		return crc, err
+	}
+	clusterVersion, err := configClient.ClusterVersions().Get("version", metav1.GetOptions{})
 	if err != nil {
 		return crc, err
 	}
@@ -435,20 +451,25 @@ func (r *ReconcileCrcCluster) restartOpenShiftAPIServer(k8sClient *kubernetes.Cl
 		TailLines: &tailLines,
 	}
 	for _, pod := range pods.Items {
+		var needsRestart bool
 		request := k8sClient.CoreV1().Pods(apiServerNs).GetLogs(pod.Name, podLogOptions)
 		logStream, err := request.Stream()
 		if err != nil {
-			return err
+			needsRestart = true
+		} else {
+			defer logStream.Close()
+			buf := new(bytes.Buffer)
+			_, err = buf.ReadFrom(logStream)
+			if err != nil {
+				return err
+			}
+			logs := buf.String()
+			fmt.Println("!!! API Server logs: %s\n", logs)
+			if strings.Contains(logs, apiServerNeedsRestartMarker) {
+				needsRestart = true
+			}
 		}
-		defer logStream.Close()
-		buf := new(bytes.Buffer)
-		_, err = buf.ReadFrom(logStream)
-		if err != nil {
-			return err
-		}
-		logs := buf.String()
-		fmt.Println("!!! API Server logs: %s\n", logs)
-		if strings.Contains(logs, apiServerNeedsRestartMarker) {
+		if needsRestart {
 			err := k8sClient.CoreV1().Pods(apiServerNs).Delete(pod.Name, &metav1.DeleteOptions{})
 			if err != nil {
 				return err
