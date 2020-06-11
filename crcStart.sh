@@ -40,8 +40,8 @@ metadata:
   name: ${VM_NAME}
   namespace: ${VM_NAMESPACE}
 spec:
-  cpu: 16
-  memory: 24Gi
+  cpu: 8
+  memory: 20Gi
   pullSecret: $(cat $PULL_SECRET_FILE | base64 -w 0)
 EOF
 
@@ -228,6 +228,15 @@ done
 until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
   sleep 2
 done
+
+sleep 10
+while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
+  log -n "."
+  sleep 2
+done
+until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
+  sleep 2
+done
 while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
   log -n "."
   sleep 2
@@ -237,14 +246,23 @@ log ""
 
 dlog "> Final stabilization check"
 until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
+  log -n "."
   sleep 2
 done
+sleep 5
+while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
+  log -n "."
+  sleep 2
+done
+log ""
 
 if [ "true" == "$DEBUG" ]; then
   ${OCCRC} get pod --all-namespaces
 fi
 
-CRC_CONSOLE="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.consoleURL})"
+CRC_CONSOLE="https://$(${OCCRC} get route -n openshift-console console -o jsonpath={.spec.host})"
+# TODO: Not actually populating status.ConsoleURL yet
+# CRC_CONSOLE="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.consoleURL})"
 KUBEADMIN_PASSWORD="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.kubeAdminPassword})"
 
 log "> CRC cluster is up!
