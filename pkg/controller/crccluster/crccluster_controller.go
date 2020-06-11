@@ -1,6 +1,7 @@
 package crccluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -17,8 +18,10 @@ import (
 	"github.com/google/uuid"
 	configv1 "github.com/openshift/api/config/v1"
 	routev1 "github.com/openshift/api/route/v1"
+	configv1Client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 	"github.com/operator-framework/operator-sdk/pkg/status"
 	"golang.org/x/crypto/ssh"
+	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +31,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	kubevirtv1 "kubevirt.io/client-go/api/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -216,7 +222,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	r.updateNetworkingNotReadyCondition(k8sService, crc)
 	r.updateCredentials(crc)
 
-	crc, err = r.updateCrcClusterStatus(reqLogger, crc)
+	crc, err = r.updateCrcClusterStatus(crc)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -241,16 +247,66 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 	}
 
+	crcK8sConfig, err := restConfigFromCrcCluster(crc)
+	if err != nil {
+		reqLogger.Error(err, "Error generated Kubernetes REST config from CrcCluster kubeconfig.")
+		return reconcile.Result{}, err
+	}
+	k8sClient, err := kubernetes.NewForConfig(crcK8sConfig)
+	if err != nil {
+		reqLogger.Error(err, "Error generating Kubernetes client from REST config.")
+		return reconcile.Result{}, err
+	}
+
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
-		crc, err = r.ensureClusterConfigured(reqLogger, sshClient, crc)
+		reqLogger.Info("Updating pull secret in CrcCluster.")
+		if err := r.updatePullSecret(crc, sshClient, k8sClient); err != nil {
+			reqLogger.Error(err, "Error updating pull secret in CrcCluster.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Updating clusterID in CrcCluster.")
+		crc, err = r.updateClusterID(crc, k8sClient)
 		if err != nil {
-			reqLogger.Error(err, "Failed to configure cluster.")
+			reqLogger.Error(err, "Error updating clusterID in crcCluster.")
+			return reconcile.Result{}, err
+		}
+
+		if !r.hasRequestHeaderClientCA(k8sClient) {
+			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
+		}
+
+		reqLogger.Info("Restarting OpenShift APIServer in CrcCluster.")
+		if err := r.restartOpenShiftAPIServer(k8sClient); err != nil {
+			reqLogger.Error(err, "Error restarting OpenShift API server.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Waiting on OpenShift APIServer to stabilize.")
+		stable, err := r.waitForOpenShiftAPIServer(k8sClient)
+		if err != nil {
+			reqLogger.Error(err, "Error waiting on OpenShift API server to stabilize.")
+			return reconcile.Result{}, err
+		}
+		if !stable {
+			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
+		}
+
+		reqLogger.Info("Approving CSRs.")
+		if err := r.approveCSRs(k8sClient); err != nil {
+			reqLogger.Error(err, "Error approving CSRs.")
+			return reconcile.Result{}, err
+		}
+
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
+		crc, err = r.updateCrcClusterStatus(crc)
+		if err != nil {
 			return reconcile.Result{}, err
 		}
 	}
 
 	crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
-	crc, err = r.updateCrcClusterStatus(reqLogger, crc)
+	crc, err = r.updateCrcClusterStatus(crc)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -258,7 +314,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	return reconcile.Result{}, nil
 }
 
-func (r *ReconcileCrcCluster) updateCrcClusterStatus(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
+func (r *ReconcileCrcCluster) updateCrcClusterStatus(crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
 	existingCrc := &crcv1alpha1.CrcCluster{}
 	err := r.client.Get(context.TODO(), types.NamespacedName{Name: crc.Name, Namespace: crc.Namespace}, existingCrc)
 	if err != nil {
@@ -267,7 +323,6 @@ func (r *ReconcileCrcCluster) updateCrcClusterStatus(logger logr.Logger, crc *cr
 	if !reflect.DeepEqual(crc.Status, existingCrc.Status) {
 		err := r.client.Status().Update(context.TODO(), crc)
 		if err != nil {
-			logger.Error(err, "Failed to update CrcCluster status.")
 			return crc, err
 		}
 		updatedCrc := &crcv1alpha1.CrcCluster{}
@@ -280,65 +335,175 @@ func (r *ReconcileCrcCluster) updateCrcClusterStatus(logger logr.Logger, crc *cr
 	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) ensureClusterConfigured(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
+func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster) (*rest.Config, error) {
+	kubeconfigBytes, err := base64.StdEncoding.DecodeString(crc.Status.Kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
+	if err != nil {
+		return nil, err
+	}
 
+	return config, nil
+}
+
+func (r *ReconcileCrcCluster) updatePullSecret(crc *crcv1alpha1.CrcCluster, sshClient sshClient.Client, k8sClient *kubernetes.Clientset) error {
+	// Copy pull secret to node
+	pullSecretScript := fmt.Sprintf(`
+set -e
+echo "%s" | base64 -d | sudo tee /var/lib/kubelet/config.json
+sudo chmod 0600 /var/lib/kubelet/config.json
+`, crc.Spec.PullSecret)
+	output, err := sshClient.Output(pullSecretScript)
+	if err != nil {
+		fmt.Println(output)
+		return err
+	}
+
+	// Update pull-secret secret in the cluster
+	openshiftConfigNs := "openshift-config"
+	secretName := "pull-secret"
+	secret, err := k8sClient.CoreV1().Secrets(openshiftConfigNs).Get(secretName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	crcPullSecretBytes := []byte(crc.Spec.PullSecret)
+	existingPullSecretBytes, found := secret.Data[".dockerconfigjson"]
+	if !found || !bytes.Equal(existingPullSecretBytes, crcPullSecretBytes) {
+		secret.Data[".dockerconfigjson"] = crcPullSecretBytes
+		if _, err := k8sClient.CoreV1().Secrets(openshiftConfigNs).Update(secret); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) updateClusterID(crc *crcv1alpha1.CrcCluster, k8sClient *kubernetes.Clientset) (*crcv1alpha1.CrcCluster, error) {
 	if crc.Status.ClusterID == "" {
 		clusterID, err := uuid.NewRandom()
 		if err != nil {
-			logger.Error(err, "Error generating clusterID.")
 			return crc, err
 		}
 		crc.Status.ClusterID = clusterID.String()
+		crc, err = r.updateCrcClusterStatus(crc)
+		if err != nil {
+			return crc, err
+		}
 	}
 
-	configureScript := fmt.Sprintf(`
-set -e
-echo "%[1]s" | base64 -d | sudo tee /var/lib/kubelet/config.json
-sudo chmod 0600 /var/lib/kubelet/config.json
-
-echo "%[2]s" | base64 -d | sed 's|%[3]s|https://api.crc.testing:6443|' | sudo tee /tmp/kubeconfig
-export OCCRC="oc --insecure-skip-tls-verify --kubeconfig /tmp/kubeconfig"
-
-${OCCRC} patch secret pull-secret -p "{\"data\":{\".dockerconfigjson\":\"%[1]s\"}}" -n openshift-config --type merge
-
-${OCCRC} get clusterversion version
-${OCCRC} patch clusterversion version -p "{\"spec\":{\"clusterID\":\"%[4]s\"}}" --type merge
-
-[ ! -z "${OCCRC} get configmaps/extension-apiserver-authentication -o jsonpath={.data.requestheader-client-ca-file} -n kube-system)" ]
-
-${OCCRC} delete pod --all -n openshift-apiserver
-sleep 5
-${OCCRC} wait -n openshift-apiserver --for=condition=Available deployment/apiserver --timeout=300s
-
-for csr in $(${OCCRC} get csr | grep Pending | awk '{print $1'}); do
-  ${OCCRC} adm certificate approve ${csr}
-done
-
-if [ $? == 0 ]; then
-  echo "__cluster_configured: true"
-fi
-`, crc.Spec.PullSecret, crc.Status.Kubeconfig, crc.Status.APIURL, crc.Status.ClusterID)
-
-	fmt.Printf("!!! configureScript is:\n\n\n%s\n\n\n", configureScript)
-	output, err := sshClient.Output(configureScript)
-	if err != nil {
-		logger.Error(err, "Error configuring cluster.")
-		fmt.Println(output)
-		return crc, err
-	}
-	logger.Info(fmt.Sprintf("Configure script output: %s", output))
-	clusterConfigured := strings.Contains(output, "__cluster_configured: true")
-	if !clusterConfigured {
-		return crc, fmt.Errorf("Error configuring cluster: %s", output)
-	}
-
-	crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
-	crc, err = r.updateCrcClusterStatus(logger, crc)
+	configClient := configv1Client.New(k8sClient.CoreV1().RESTClient())
+	clusterVersionName := "config"
+	clusterVersion, err := configClient.ClusterVersions().Get(clusterVersionName, metav1.GetOptions{})
 	if err != nil {
 		return crc, err
+	}
+	crcClusterID := configv1.ClusterID(crc.Status.ClusterID)
+	if clusterVersion.Spec.ClusterID != crcClusterID {
+		clusterVersion.Spec.ClusterID = crcClusterID
+		if _, err := configClient.ClusterVersions().Update(clusterVersion); err != nil {
+			return crc, err
+		}
 	}
 
 	return crc, nil
+}
+
+func (r *ReconcileCrcCluster) hasRequestHeaderClientCA(k8sClient *kubernetes.Clientset) bool {
+	configMap, err := k8sClient.CoreV1().ConfigMaps("kube-system").Get("extension-apiserver-authentication", metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	if configMap.Data["requestheader-client-ca-file"] != "" {
+		return true
+	}
+	return false
+}
+
+const (
+	apiServerNeedsRestartMarker = "x509: certificate signed by unknown authority"
+	apiServerNs                 = "openshift-apiserver"
+)
+
+func (r *ReconcileCrcCluster) restartOpenShiftAPIServer(k8sClient *kubernetes.Clientset) error {
+	pods, err := k8sClient.CoreV1().Pods(apiServerNs).List(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	tailLines := int64(25)
+	podLogOptions := &corev1.PodLogOptions{
+		TailLines: &tailLines,
+	}
+	for _, pod := range pods.Items {
+		request := k8sClient.CoreV1().Pods(apiServerNs).GetLogs(pod.Name, podLogOptions)
+		logStream, err := request.Stream()
+		if err != nil {
+			return err
+		}
+		defer logStream.Close()
+		buf := new(bytes.Buffer)
+		_, err = buf.ReadFrom(logStream)
+		if err != nil {
+			return err
+		}
+		logs := buf.String()
+		fmt.Println("!!! API Server logs: %s\n", logs)
+		if strings.Contains(logs, apiServerNeedsRestartMarker) {
+			err := k8sClient.CoreV1().Pods(apiServerNs).Delete(pod.Name, &metav1.DeleteOptions{})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) waitForOpenShiftAPIServer(k8sClient *kubernetes.Clientset) (bool, error) {
+	pods, err := k8sClient.CoreV1().Pods(apiServerNs).List(metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	if len(pods.Items) < 1 {
+		return false, fmt.Errorf("Expected at least one OpenShift API server pod, found %d", pods.Items)
+	}
+	for _, pod := range pods.Items {
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady {
+				if condition.Status == corev1.ConditionTrue {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+func (r *ReconcileCrcCluster) approveCSRs(k8sClient *kubernetes.Clientset) error {
+	csrs, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().List(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for _, csr := range csrs.Items {
+		var alreadyApproved bool
+		for _, condition := range csr.Status.Conditions {
+			if condition.Type == certificatesv1beta1.CertificateApproved {
+				alreadyApproved = true
+			}
+		}
+		if !alreadyApproved {
+			csr.Status.Conditions = append(csr.Status.Conditions, certificatesv1beta1.CertificateSigningRequestCondition{
+				Type:           certificatesv1beta1.CertificateApproved,
+				Reason:         "CRCApprove",
+				Message:        "This CSR was approved by CodeReady Containers operator.",
+				LastUpdateTime: metav1.Now(),
+			})
+			_, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().UpdateApproval(&csr)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
@@ -437,7 +602,7 @@ fi
 	}
 
 	crc.SetConditionBool(crcv1alpha1.ConditionTypeKubeletNotReady, false)
-	crc, err = r.updateCrcClusterStatus(logger, crc)
+	crc, err = r.updateCrcClusterStatus(crc)
 	if err != nil {
 		return crc, err
 	}
@@ -469,7 +634,7 @@ func (r *ReconcileCrcCluster) initializeStatusConditions(logger logr.Logger, crc
 		},
 	)
 
-	crc, err := r.updateCrcClusterStatus(logger, crc)
+	crc, err := r.updateCrcClusterStatus(crc)
 	if err != nil {
 		logger.Error(err, "Failed to initialize CrcCluster status.")
 		return crc, err
