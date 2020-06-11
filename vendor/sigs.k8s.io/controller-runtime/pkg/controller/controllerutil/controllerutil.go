@@ -96,7 +96,7 @@ func SetOwnerReference(owner, object metav1.Object, scheme *runtime.Scheme) erro
 	// Validate the owner.
 	ro, ok := owner.(runtime.Object)
 	if !ok {
-		return fmt.Errorf("%T is not a runtime.Object, cannot call SetOwnerReference", owner)
+		return fmt.Errorf("%T is not a runtime.Object, cannot call SetControllerReference", owner)
 	}
 	if err := validateOwner(owner, object); err != nil {
 		return err
@@ -280,4 +280,11 @@ func RemoveFinalizerWithError(o runtime.Object, finalizer string) error {
 	}
 	RemoveFinalizer(m, finalizer)
 	return nil
+}
+
+// Object allows functions to work indistinctly with any resource that
+// implements both Object interfaces.
+type Object interface {
+	metav1.Object
+	runtime.Object
 }
