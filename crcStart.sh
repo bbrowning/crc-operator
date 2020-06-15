@@ -31,7 +31,7 @@ else
   export IS_OS=false
 fi
 
-log "> Starting CRC Cluster ${VM_NAME} in namespace ${VM_NAMESPACE} - this will take several minutes ..."
+log "> Starting CRC Cluster ${VM_NAME} in namespace ${VM_NAMESPACE} - this can take up to 15 minutes..."
 
 cat <<EOF | oc apply -f -
 apiVersion: crc.developer.openshift.io/v1alpha1
@@ -46,8 +46,7 @@ spec:
 EOF
 
 log "> Waiting for ${VM_NAME} cluster to be ready"
-oc wait --for=condition=Ready crc/${VM_NAME} -n ${VM_NAMESPACE} --timeout=600s
-
+oc wait --for=condition=Ready crc/${VM_NAME} -n ${VM_NAMESPACE} --timeout=900s
 
 export KUBECONFIGFILE="kubeconfig-${VM_NAME}-${VM_NAMESPACE}"
 
@@ -63,27 +62,6 @@ done
 echo "${KUBECONFIG_CONTENTS}" | base64 -d > $KUBECONFIGFILE
 
 export OCCRC="oc --insecure-skip-tls-verify --kubeconfig $KUBECONFIGFILE"
-
-dlog "> Waiting for cluster to stabilize"
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  dlog -n "."
-  sleep 2
-done
-until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-  sleep 2
-done
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  dlog -n "."
-  sleep 2
-done
-until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-  sleep 2
-done
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  dlog -n "."
-  sleep 2
-done
-dlog ""
 
 while [ -z "${ROUTE_DOMAIN}" ]; do
   export ROUTE_DOMAIN=$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.baseDomain} || echo '')
@@ -165,92 +143,14 @@ spec:
 EOF
 fi
 
-OLD_ROUTE_DOMAIN=$(${OCCRC} get ingresscontroller default -n openshift-ingress-operator -o jsonpath={.status.domain})
-if [ "${ROUTE_DOMAIN}" != "${OLD_ROUTE_DOMAIN}" ]; then
-  dlog "> Updating default Ingress domain"
-  ${OCCRC} patch ingress.config.openshift.io cluster -p "{\"spec\": {\"domain\": \"${ROUTE_DOMAIN}\"}}" --type merge 1>/dev/null
-
-  dlog "> Recreating default router with updated domain"
-  ${OCCRC} delete ingresscontrollers -n openshift-ingress-operator default
-  cat <<EOF | ${OCCRC} apply -f -
-apiVersion: operator.openshift.io/v1
-kind: IngressController
-metadata:
-  name: default
-  namespace: openshift-ingress-operator
-spec:
-  replicas: 1
-  domain: ${ROUTE_DOMAIN}
-EOF
-
-  dlog "> Waiting for cluster to stabilize"
-  while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-    dlog -n "."
-    sleep 2
-  done
-  until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-    sleep 2
-  done
-  while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-    dlog -n "."
-    sleep 2
-  done
-  until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-    sleep 2
-  done
-  while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-    dlog -n "."
-    sleep 2
-  done
-  dlog ""
-fi
-
-log "Updating console route for new cluster"
-until ${OCCRC} patch route -n openshift-console console -p "{\"spec\": {\"host\": \"console-openshift-console.${ROUTE_DOMAIN}\"}}" --type=merge 1>/dev/null; do
-  sleep 2
-done
-
-log "> Waiting for cluster to stabilize"
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  log -n "."
-  sleep 2
-done
-until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-  sleep 2
-done
-
-sleep 10
-
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  log -n "."
-  sleep 2
-done
-until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-  sleep 2
-done
-
-sleep 10
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  log -n "."
-  sleep 2
-done
-until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
-  sleep 2
-done
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
-  log -n "."
-  sleep 2
-done
-log ""
-
 
 dlog "> Final stabilization check"
-until ${OCCRC} get route -n openshift-console console 1>/dev/null 2>/dev/null; do
+until ${OCCRC} get route -n openshift-console console; do
   log -n "."
   sleep 2
 done
 sleep 5
-while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed 1>/dev/null 2>/dev/null; do
+while ${OCCRC} get pod --no-headers --all-namespaces | grep -v Running | grep -v Completed | grep -v Terminating; do
   log -n "."
   sleep 2
 done
