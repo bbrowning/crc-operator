@@ -276,19 +276,53 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 			return reconcile.Result{}, err
 		}
 
-		reqLogger.Info("Updating clusterID.")
+		reqLogger.Info("Updating cluster ID.")
 		crc, err = r.updateClusterID(crc, insecureCrcK8sConfig)
 		if err != nil {
-			reqLogger.Error(err, "Error updating clusterID.")
+			reqLogger.Error(err, "Error updating cluster ID.")
 			return reconcile.Result{}, err
 		}
 
+		reqLogger.Info("Approving CSRs.")
+		if err := r.approveCSRs(insecureK8sClient); err != nil {
+			reqLogger.Error(err, "Error approving CSRs.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Updating ingress domain.")
+		if err := r.updateIngressDomain(crc, insecureCrcK8sConfig); err != nil {
+			reqLogger.Error(err, "Error updating ingress domain.")
+			return reconcile.Result{}, err
+		}
+
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
+		crc, err = r.updateCrcClusterStatus(crc)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
+	if crc.Status.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeReady) {
+		reqLogger.Info("Ensuring ingress controllers updated.")
+		if err := r.ensureIngressControllersUpdated(crc, insecureCrcK8sConfig); err != nil {
+			reqLogger.Error(err, "Error updating ingress controllers.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Cleaning up terminating OpenShift router pods.")
+		if err := r.cleanupTerminatingRouterPods(insecureK8sClient); err != nil {
+			reqLogger.Error(err, "Error cleaning up terminating OpenShift router pods.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Checking for requestheader-client-ca.")
 		hasRequestCA, err := r.hasRequestHeaderClientCA(insecureK8sClient)
 		if err != nil {
 			reqLogger.Error(err, "Error checking for requestheader-client-ca.")
 			return reconcile.Result{}, err
 		}
 		if !hasRequestCA {
+			reqLogger.Info("No requestheader-client-ca yet - trying again.")
 			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
 		}
 
@@ -308,18 +342,6 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
 		}
 
-		reqLogger.Info("Approving CSRs.")
-		if err := r.approveCSRs(insecureK8sClient); err != nil {
-			reqLogger.Error(err, "Error approving CSRs.")
-			return reconcile.Result{}, err
-		}
-
-		reqLogger.Info("Updating ingress domain.")
-		if err := r.updateIngressDomain(crc, insecureCrcK8sConfig); err != nil {
-			reqLogger.Error(err, "Error updating ingress domain.")
-			return reconcile.Result{}, err
-		}
-
 		fmt.Printf("blah blah k8sClient %v\n", k8sClient)
 
 		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
@@ -327,12 +349,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-	}
 
-	crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
-	crc, err = r.updateCrcClusterStatus(crc)
-	if err != nil {
-		return reconcile.Result{}, err
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
+		crc, err = r.updateCrcClusterStatus(crc)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 
 	return reconcile.Result{}, nil
@@ -477,13 +499,37 @@ func (r *ReconcileCrcCluster) restartOpenShiftAPIServer(k8sClient *kubernetes.Cl
 				return err
 			}
 			logs := buf.String()
-			fmt.Println("!!! API Server logs: %s\n", logs)
 			if strings.Contains(logs, apiServerNeedsRestartMarker) {
 				needsRestart = true
 			}
 		}
 		if needsRestart {
 			err := k8sClient.CoreV1().Pods(apiServerNs).Delete(pod.Name, &metav1.DeleteOptions{})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) cleanupTerminatingRouterPods(k8sClient *kubernetes.Clientset) error {
+	openshiftIngressNs := "openshift-ingress"
+	pods, err := k8sClient.CoreV1().Pods(openshiftIngressNs).List(metav1.ListOptions{FieldSelector: "status.phase=Running"})
+	if err != nil {
+		return err
+	}
+	for _, pod := range pods.Items {
+		fmt.Printf("!!! FOUND ROUTER POD %s\n", pod.Name)
+		if pod.DeletionTimestamp != nil {
+			// This pod is terminating, so let's help it
+			// along. Otherwise it can take 3+ minutes before our new
+			// router pods start
+			gracePeriodSeconds := int64(0)
+			deleteOptions := &metav1.DeleteOptions{
+				GracePeriodSeconds: &gracePeriodSeconds,
+			}
+			err := k8sClient.CoreV1().Pods(pod.Namespace).Delete(pod.Name, deleteOptions)
 			if err != nil {
 				return err
 			}
@@ -555,28 +601,43 @@ func (r *ReconcileCrcCluster) updateIngressDomain(crc *crcv1alpha1.CrcCluster, r
 			return err
 		}
 	}
+	return nil
+}
 
+func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) error {
 	operatorClient, err := operatorv1Client.NewForConfig(restConfig)
 	if err != nil {
 		return err
 	}
+	needsNewIngress := false
 	ingressControllerNs := "openshift-ingress-operator"
 	ingressControllerName := "default"
+	numReplicas := int32(1)
 	ingressController, err := operatorClient.IngressControllers(ingressControllerNs).Get(ingressControllerName, metav1.GetOptions{})
-	if err != nil {
+	if err != nil && errors.IsNotFound(err) {
+		needsNewIngress = true
+	} else if err != nil {
 		return err
-	}
-	if ingressController.Status.Domain != crc.Status.BaseDomain {
-		if err := operatorClient.IngressControllers(ingressControllerNs).Delete(ingress.Name, &metav1.DeleteOptions{}); err != nil {
-			return err
+	} else {
+		if ingressController.Status.Domain != crc.Status.BaseDomain {
+			if err := operatorClient.IngressControllers(ingressControllerNs).Delete(ingressControllerName, &metav1.DeleteOptions{}); err != nil {
+				return err
+			}
+			needsNewIngress = true
+		} else if ingressController.Spec.Replicas == nil || *ingressController.Spec.Replicas != numReplicas {
+			ingressController.Spec.Replicas = &numReplicas
+			if _, err := operatorClient.IngressControllers(ingressControllerNs).Update(ingressController); err != nil {
+				return err
+			}
 		}
-		replicas := int32(1)
+	}
+	if needsNewIngress {
 		newIngress := &operatorv1.IngressController{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: ingressControllerName,
 			},
 			Spec: operatorv1.IngressControllerSpec{
-				Replicas: &replicas,
+				Replicas: &numReplicas,
 				Domain:   crc.Status.BaseDomain,
 			},
 		}
