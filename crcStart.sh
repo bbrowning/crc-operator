@@ -160,9 +160,7 @@ if [ "true" == "$DEBUG" ]; then
   ${OCCRC} get pod --all-namespaces
 fi
 
-CRC_CONSOLE="https://$(${OCCRC} get route -n openshift-console console -o jsonpath={.spec.host})"
-# TODO: Not actually populating status.ConsoleURL yet
-# CRC_CONSOLE="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.consoleURL})"
+CRC_CONSOLE="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.consoleURL})"
 KUBEADMIN_PASSWORD="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.kubeAdminPassword})"
 
 log "> CRC cluster is up!
