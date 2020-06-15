@@ -220,6 +220,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 	crc.Status.APIURL = fmt.Sprintf("https://%s", apiHost)
 	crc.Status.BaseDomain = strings.Replace(apiHost, "api.", "", 1)
+	crc.Status.ConsoleURL = fmt.Sprintf("https://%s", consoleHost(crc.Status.BaseDomain))
 
 	r.updateVirtualMachineNotReadyCondition(virtualMachine, crc)
 	r.updateNetworkingNotReadyCondition(k8sService, crc)
@@ -594,7 +595,7 @@ func (r *ReconcileCrcCluster) updateConsoleRoute(crc *crcv1alpha1.CrcCluster, re
 	}
 	consoleRouteNs := "openshift-console"
 	consoleRouteName := "console"
-	consoleRouteHost := fmt.Sprintf("console-openshift-console.%s", crc.Status.BaseDomain)
+	consoleRouteHost := consoleHost(crc.Status.BaseDomain)
 	route, err := routeClient.Routes(consoleRouteNs).Get(consoleRouteName, metav1.GetOptions{})
 	if err != nil {
 		return false, err
@@ -1320,4 +1321,8 @@ DFJEMUnvRq2X433USHAuY1yMZ4b8BWHx/67SbJLgkwq/NwUBKQEVCIHtp6IbKo3cPaymJA
 		Port:     sshPort,
 	}
 	return sshClient, nil
+}
+
+func consoleHost(baseDomain string) string {
+	return fmt.Sprintf("console-openshift-console.%s", baseDomain)
 }
