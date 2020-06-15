@@ -21,6 +21,7 @@ import (
 	routev1 "github.com/openshift/api/route/v1"
 	configv1Client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 	operatorv1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1"
+	routev1Client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
 	"github.com/operator-framework/operator-sdk/pkg/status"
 	"golang.org/x/crypto/ssh"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
@@ -323,32 +324,39 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 		if !hasRequestCA {
 			reqLogger.Info("No requestheader-client-ca yet - trying again.")
-			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
+			return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 		}
 
-		reqLogger.Info("Restarting OpenShift APIServer.")
-		if err := r.restartOpenShiftAPIServer(insecureK8sClient); err != nil {
-			reqLogger.Error(err, "Error restarting OpenShift API server.")
-			return reconcile.Result{}, err
-		}
-
-		reqLogger.Info("Waiting on OpenShift APIServer to stabilize.")
+		reqLogger.Info("Waiting on OpenShift API Server to stabilize.")
 		stable, err := r.waitForOpenShiftAPIServer(insecureK8sClient)
 		if err != nil {
-			reqLogger.Error(err, "Error waiting on OpenShift API server to stabilize.")
+			reqLogger.Error(err, "Error waiting on OpenShift API Server to stabilize.")
 			return reconcile.Result{}, err
 		}
 		if !stable {
-			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
+			return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+		}
+
+		reqLogger.Info("Updating console route.")
+		consoleRouteUpdated, err := r.updateConsoleRoute(crc, insecureCrcK8sConfig)
+		if err != nil {
+			reqLogger.Error(err, "Error updating console route.")
+			return reconcile.Result{}, err
+		} else if consoleRouteUpdated {
+			return reconcile.Result{RequeueAfter: time.Second * 20}, nil
+		}
+
+		reqLogger.Info("Waiting on cluster to stabilize.")
+		stable, err = r.waitForClusterToStabilize(insecureK8sClient)
+		if err != nil {
+			reqLogger.Error(err, "Error waiting on cluster to stabilize.")
+			return reconcile.Result{}, err
+		}
+		if !stable {
+			return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 		}
 
 		fmt.Printf("blah blah k8sClient %v\n", k8sClient)
-
-		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, false)
-		crc, err = r.updateCrcClusterStatus(crc)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
 
 		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
 		crc, err = r.updateCrcClusterStatus(crc)
@@ -471,48 +479,6 @@ func (r *ReconcileCrcCluster) hasRequestHeaderClientCA(k8sClient *kubernetes.Cli
 	return false, nil
 }
 
-const (
-	apiServerNeedsRestartMarker = "x509: certificate signed by unknown authority"
-	apiServerNs                 = "openshift-apiserver"
-)
-
-func (r *ReconcileCrcCluster) restartOpenShiftAPIServer(k8sClient *kubernetes.Clientset) error {
-	pods, err := k8sClient.CoreV1().Pods(apiServerNs).List(metav1.ListOptions{})
-	if err != nil {
-		return err
-	}
-	tailLines := int64(25)
-	podLogOptions := &corev1.PodLogOptions{
-		TailLines: &tailLines,
-	}
-	for _, pod := range pods.Items {
-		var needsRestart bool
-		request := k8sClient.CoreV1().Pods(apiServerNs).GetLogs(pod.Name, podLogOptions)
-		logStream, err := request.Stream()
-		if err != nil {
-			needsRestart = true
-		} else {
-			defer logStream.Close()
-			buf := new(bytes.Buffer)
-			_, err = buf.ReadFrom(logStream)
-			if err != nil {
-				return err
-			}
-			logs := buf.String()
-			if strings.Contains(logs, apiServerNeedsRestartMarker) {
-				needsRestart = true
-			}
-		}
-		if needsRestart {
-			err := k8sClient.CoreV1().Pods(apiServerNs).Delete(pod.Name, &metav1.DeleteOptions{})
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 func (r *ReconcileCrcCluster) cleanupTerminatingRouterPods(k8sClient *kubernetes.Clientset) error {
 	openshiftIngressNs := "openshift-ingress"
 	pods, err := k8sClient.CoreV1().Pods(openshiftIngressNs).List(metav1.ListOptions{FieldSelector: "status.phase=Running"})
@@ -520,7 +486,6 @@ func (r *ReconcileCrcCluster) cleanupTerminatingRouterPods(k8sClient *kubernetes
 		return err
 	}
 	for _, pod := range pods.Items {
-		fmt.Printf("!!! FOUND ROUTER POD %s\n", pod.Name)
 		if pod.DeletionTimestamp != nil {
 			// This pod is terminating, so let's help it
 			// along. Otherwise it can take 3+ minutes before our new
@@ -539,6 +504,7 @@ func (r *ReconcileCrcCluster) cleanupTerminatingRouterPods(k8sClient *kubernetes
 }
 
 func (r *ReconcileCrcCluster) waitForOpenShiftAPIServer(k8sClient *kubernetes.Clientset) (bool, error) {
+	apiServerNs := "openshift-apiserver"
 	pods, err := k8sClient.CoreV1().Pods(apiServerNs).List(metav1.ListOptions{})
 	if err != nil {
 		return false, err
@@ -556,6 +522,23 @@ func (r *ReconcileCrcCluster) waitForOpenShiftAPIServer(k8sClient *kubernetes.Cl
 		}
 	}
 	return false, nil
+}
+
+func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Clientset) (bool, error) {
+	pods, err := k8sClient.CoreV1().Pods("").List(metav1.ListOptions{FieldSelector: "status.phase!=Succeeded"})
+	if err != nil {
+		return false, err
+	}
+	for _, pod := range pods.Items {
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady {
+				if condition.Status != corev1.ConditionTrue {
+					return false, nil
+				}
+			}
+		}
+	}
+	return true, nil
 }
 
 func (r *ReconcileCrcCluster) approveCSRs(k8sClient *kubernetes.Clientset) error {
@@ -602,6 +585,28 @@ func (r *ReconcileCrcCluster) updateIngressDomain(crc *crcv1alpha1.CrcCluster, r
 		}
 	}
 	return nil
+}
+
+func (r *ReconcileCrcCluster) updateConsoleRoute(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) (bool, error) {
+	routeClient, err := routev1Client.NewForConfig(restConfig)
+	if err != nil {
+		return false, err
+	}
+	consoleRouteNs := "openshift-console"
+	consoleRouteName := "console"
+	consoleRouteHost := fmt.Sprintf("console-openshift-console.%s", crc.Status.BaseDomain)
+	route, err := routeClient.Routes(consoleRouteNs).Get(consoleRouteName, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	if route.Spec.Host != consoleRouteHost {
+		route.Spec.Host = consoleRouteHost
+		if _, err := routeClient.Routes(consoleRouteNs).Update(route); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) error {
@@ -734,14 +739,12 @@ if [ $? == 0 ]; then
 fi
 `, crc.Status.BaseDomain, nameserver)
 
-		fmt.Printf("!!! startKubeletScript is:\n\n\n%s\n\n\n", startKubeletScript)
 		output, err := sshClient.Output(startKubeletScript)
 		if err != nil {
 			logger.Error(err, "Error checking kubelet status in VirtualMachine.")
 			fmt.Println(output)
 			return crc, err
 		}
-		logger.Info(fmt.Sprintf("Kubelet start output: %s", output))
 		kubeletRunning = strings.Contains(output, "__kubelet_running: true")
 	}
 
