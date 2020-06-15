@@ -17,8 +17,10 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	configv1 "github.com/openshift/api/config/v1"
+	operatorv1 "github.com/openshift/api/operator/v1"
 	routev1 "github.com/openshift/api/route/v1"
 	configv1Client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
+	operatorv1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1"
 	"github.com/operator-framework/operator-sdk/pkg/status"
 	"golang.org/x/crypto/ssh"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
@@ -249,7 +251,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 
 	crcK8sConfig, err := restConfigFromCrcCluster(crc)
 	if err != nil {
-		reqLogger.Error(err, "Error generated Kubernetes REST config from CrcCluster kubeconfig.")
+		reqLogger.Error(err, "Error generating Kubernetes REST config from kubeconfig.")
 		return reconcile.Result{}, err
 	}
 	k8sClient, err := kubernetes.NewForConfig(crcK8sConfig)
@@ -268,24 +270,29 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
-		reqLogger.Info("Updating pull secret in CrcCluster.")
+		reqLogger.Info("Updating pull secret.")
 		if err := r.updatePullSecret(crc, sshClient, insecureK8sClient); err != nil {
-			reqLogger.Error(err, "Error updating pull secret in CrcCluster.")
+			reqLogger.Error(err, "Error updating pull secret.")
 			return reconcile.Result{}, err
 		}
 
-		reqLogger.Info("Updating clusterID in CrcCluster.")
+		reqLogger.Info("Updating clusterID.")
 		crc, err = r.updateClusterID(crc, insecureCrcK8sConfig)
 		if err != nil {
-			reqLogger.Error(err, "Error updating clusterID in crcCluster.")
+			reqLogger.Error(err, "Error updating clusterID.")
 			return reconcile.Result{}, err
 		}
 
-		if !r.hasRequestHeaderClientCA(insecureK8sClient) {
+		hasRequestCA, err := r.hasRequestHeaderClientCA(insecureK8sClient)
+		if err != nil {
+			reqLogger.Error(err, "Error checking for requestheader-client-ca.")
+			return reconcile.Result{}, err
+		}
+		if !hasRequestCA {
 			return reconcile.Result{RequeueAfter: time.Second * 5}, nil
 		}
 
-		reqLogger.Info("Restarting OpenShift APIServer in CrcCluster.")
+		reqLogger.Info("Restarting OpenShift APIServer.")
 		if err := r.restartOpenShiftAPIServer(insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error restarting OpenShift API server.")
 			return reconcile.Result{}, err
@@ -304,6 +311,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		reqLogger.Info("Approving CSRs.")
 		if err := r.approveCSRs(insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error approving CSRs.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Updating ingress domain.")
+		if err := r.updateIngressDomain(crc, insecureCrcK8sConfig); err != nil {
+			reqLogger.Error(err, "Error updating ingress domain.")
 			return reconcile.Result{}, err
 		}
 
@@ -425,15 +438,15 @@ func (r *ReconcileCrcCluster) updateClusterID(crc *crcv1alpha1.CrcCluster, restC
 	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) hasRequestHeaderClientCA(k8sClient *kubernetes.Clientset) bool {
+func (r *ReconcileCrcCluster) hasRequestHeaderClientCA(k8sClient *kubernetes.Clientset) (bool, error) {
 	configMap, err := k8sClient.CoreV1().ConfigMaps("kube-system").Get("extension-apiserver-authentication", metav1.GetOptions{})
 	if err != nil {
-		return false
+		return false, err
 	}
 	if configMap.Data["requestheader-client-ca-file"] != "" {
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 const (
@@ -527,6 +540,59 @@ func (r *ReconcileCrcCluster) approveCSRs(k8sClient *kubernetes.Clientset) error
 	return nil
 }
 
+func (r *ReconcileCrcCluster) updateIngressDomain(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) error {
+	configClient, err := configv1Client.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+	ingress, err := configClient.Ingresses().Get("cluster", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if ingress.Spec.Domain != crc.Status.BaseDomain {
+		ingress.Spec.Domain = crc.Status.BaseDomain
+		if _, err := configClient.Ingresses().Update(ingress); err != nil {
+			return err
+		}
+	}
+
+	operatorClient, err := operatorv1Client.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+	ingressControllerNs := "openshift-ingress-operator"
+	ingressControllerName := "default"
+	ingressController, err := operatorClient.IngressControllers(ingressControllerNs).Get(ingressControllerName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if ingressController.Status.Domain != crc.Status.BaseDomain {
+		if err := operatorClient.IngressControllers(ingressControllerNs).Delete(ingress.Name, &metav1.DeleteOptions{}); err != nil {
+			return err
+		}
+		replicas := int32(1)
+		newIngress := &operatorv1.IngressController{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: ingressControllerName,
+			},
+			Spec: operatorv1.IngressControllerSpec{
+				Replicas: &replicas,
+				Domain:   crc.Status.BaseDomain,
+			},
+		}
+		if _, err := operatorClient.IngressControllers(ingressControllerNs).Create(newIngress); err != nil {
+			// If we get an already exists here then it means the
+			// ingress operator already recreated this for us
+			// immediately after the delete above so just ignore
+			// it. We only create here to speed things up.
+			if !errors.IsAlreadyExists(err) {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
 	output, err := sshClient.Output(`sudo systemctl status kubelet; if [ $? == 0 ]; then echo "__kubelet_running: true"; else echo "__kubelet_running: false"; fi`)
 	if err != nil {
@@ -554,7 +620,7 @@ func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient
 
 		startKubeletScript := fmt.Sprintf(`
 set -e
-echo "> Setting up DNS and starting kubelet in CRC VM"
+echo "> Setting up DNS and starting kubelet."
 echo ">> Setting up dnsmasq.conf"
 echo "user=root
 port= 53
@@ -573,18 +639,18 @@ address=/$(hostname).crc.testing/192.168.126.11" | sudo tee /var/srv/dnsmasq.con
 
 sudo cat /var/srv/dnsmasq.conf
 
-echo ">> Starting dnsmasq container in CRC VM"
+echo ">> Starting dnsmasq container."
 sudo podman rm -f dnsmasq 2>/dev/null || true
 sudo rm -f /var/lib/cni/networks/podman/10.88.0.8
 sudo podman run  --ip 10.88.0.8 --name dnsmasq -v /var/srv/dnsmasq.conf:/etc/dnsmasq.conf -p 53:53/udp --privileged -d quay.io/crcont/dnsmasq:latest
 
-echo ">> Updating resolv.conf in CRC VM"
+echo ">> Updating resolv.conf."
 echo "# Generated by CRC
 search crc.testing
 nameserver 10.88.0.8
 %[2]s" | sudo tee /etc/resolv.conf
 
-echo ">> Verifying DNS setup in CRC VM"
+echo ">> Verifying DNS setup."
 
 LOOPS=0
 until [ $LOOPS -eq 5 ] || host -R 3 foo.apps-crc.testing; do
@@ -600,7 +666,7 @@ until [ $LOOPS -eq 5 ] || host -R 3 quay.io; do
 done
 [ $LOOPS -lt 5 ]
 
-echo ">> Starting Kubelet in CRC VM"
+echo ">> Starting Kubelet."
 sudo systemctl start kubelet
 if [ $? == 0 ]; then
   echo "__kubelet_running: true"
