@@ -35,7 +35,7 @@ metadata:
   namespace: ${VM_NAMESPACE}
 spec:
   cpu: 8
-  memory: 20Gi
+  memory: 16Gi
   pullSecret: $(cat $PULL_SECRET_FILE | base64 -w 0)
 EOF
 
