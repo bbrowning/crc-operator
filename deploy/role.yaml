@@ -27,9 +27,7 @@ rules:
   - apps
   resources:
   - deployments
-  - daemonsets
   - replicasets
-  - statefulsets
   verbs:
   - create
   - delete
@@ -81,7 +79,7 @@ rules:
 - apiGroups:
   - kubevirt.io
   resources:
-  - 'virtualmachines'
+  - virtualmachines
   verbs:
   - create
   - delete
@@ -93,7 +91,7 @@ rules:
 - apiGroups:
   - config.openshift.io
   resources:
-  - 'ingresses'
+  - ingresses
   verbs:
   - get
   - list
@@ -101,7 +99,20 @@ rules:
 - apiGroups:
   - networking.k8s.io
   resources:
-  - 'ingresses'
+  - ingresses
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - route.openshift.io
+  resources:
+  - routes
+  - routes/custom-host
   verbs:
   - create
   - delete
