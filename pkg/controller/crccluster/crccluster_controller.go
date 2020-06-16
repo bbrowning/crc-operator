@@ -1378,12 +1378,9 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 	if vmRequestCPU < 2 {
 		vmRequestCPU = 2
 	}
-	// TODO: don't hardcode this, but calculate it as some percent of
-	// the requested memory with a floor of 9Gi
-	vmRequestMemory := resource.MustParse("9Gi")
 	vmResources := corev1.ResourceList{
 		corev1.ResourceCPU:    resource.MustParse(fmt.Sprintf("%d", vmRequestCPU)),
-		corev1.ResourceMemory: vmRequestMemory,
+		corev1.ResourceMemory: guestMemory,
 	}
 	vm.Spec.Template.Spec.Domain.Resources.Requests = vmResources
 
