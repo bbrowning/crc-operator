@@ -67,9 +67,6 @@ oc logs deployment/crc-operator -n crc-operator
 
 ## Create a CRC cluster
 
-The operator is still a work-in-progress, so for now you'll need the
-helper `crcStart.sh` script to actually get a CRC cluster up.
-
 Clone this repo, copy your OpenShift pull secret into a file called
 `pull-secret`, and run the commands below. You can substitute any name
 for your CRC cluster in place of `my-cluster` and any namespace in
@@ -77,28 +74,17 @@ place of `crc` in the commands below.
 
 ```
 oc new-project crc
-DEBUG=true ./crcStart.sh my-cluster crc pull-secret
+./crcStart.sh my-cluster crc pull-secret
 ```
 
-If the script hangs, fails, or otherwise something broke check the
-known issues below to see if there's a workaround. The script is still
-pretty brittle at the moment and things will be far more reliable once
-everything is ported into the operator code.
+This script is just a convenience that creates a `CrcCluster` object,
+waits for it to be Ready, and then prints the details for connecting
+to that cluster.
 
-
-After you have a cluster up, there's another helper script that will
-ensure all OpenShift Routes in your CRC cluster get a corresponding
-Route/Ingress in the parent cluster so they work end-to-end.
-
-This is another hack until the functionality gets put into this or
-some other operator. We'll likely need one pod per CRC cluster started
-to monitor the Routes inside that cluster and shuffle things back to
-the parent. This script runs forever, monitoring your cluster. CTRL+C
-it to stop monitoring Routes.
-
-```
-./copyRoutes.sh my-cluster crc
-```
+It will take 5-15 minutes for the cluster to come up, depending on
+your node sizes. If the script hangs, fails, or otherwise something
+broke check the operator pod logs and known issues below for clues on
+what went wrong.
 
 # Development
 
@@ -106,9 +92,6 @@ For developer crc-operator itself, see [DEVELOPMENT.md]().
 
 # Known Issues
 
-- Sometimes the openshift-apiserver pod needs a second restart to
-  unstick the `crcStart.sh` script - if its logs have a bunch of x509
-  errors then it needs a kicking.
 - The kubeconfigs have an incorrect certificate-authority-data that
   needs to get updated to match the actual cert from the running
   cluster. Should that have changed? Look at
