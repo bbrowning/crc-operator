@@ -361,12 +361,17 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 
 	reqLogger.Info("Waiting on cluster to stabilize.")
-	stable, err = r.waitForClusterToStabilize(insecureK8sClient)
+	notReadyPods, err := r.waitForClusterToStabilize(insecureK8sClient)
 	if err != nil {
 		reqLogger.Error(err, "Error waiting on cluster to stabilize.")
 		return reconcile.Result{}, err
 	}
-	if !stable {
+	if len(notReadyPods) > 0 {
+		notReadyPodNames := []string{}
+		for _, pod := range notReadyPods {
+			notReadyPodNames = append(notReadyPodNames, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+		}
+		reqLogger.Info("Still waiting on some pods to report as ready.", "NotReadyPodNames", notReadyPodNames)
 		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
@@ -808,21 +813,22 @@ func (r *ReconcileCrcCluster) waitForOpenShiftAPIServer(k8sClient *kubernetes.Cl
 	return false, nil
 }
 
-func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Clientset) (bool, error) {
+func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Clientset) ([]corev1.Pod, error) {
 	pods, err := k8sClient.CoreV1().Pods("").List(metav1.ListOptions{FieldSelector: "status.phase!=Succeeded"})
+	notReadyPods := []corev1.Pod{}
 	if err != nil {
-		return false, err
+		return notReadyPods, err
 	}
 	for _, pod := range pods.Items {
 		for _, condition := range pod.Status.Conditions {
 			if condition.Type == corev1.PodReady {
 				if condition.Status != corev1.ConditionTrue {
-					return false, nil
+					notReadyPods = append(notReadyPods, pod)
 				}
 			}
 		}
 	}
-	return true, nil
+	return notReadyPods, nil
 }
 
 func (r *ReconcileCrcCluster) approveCSRs(k8sClient *kubernetes.Clientset) error {
