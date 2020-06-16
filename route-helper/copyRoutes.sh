@@ -28,6 +28,8 @@ KUBECONFIGFILE="/tmp/kubeconfig-${CRC_NAME}-${CRC_NAMESPACE}"
 
 oc get crc ${CRC_NAME} -n ${CRC_NAMESPACE} -o jsonpath={.status.kubeconfig} | base64 -d > $KUBECONFIGFILE
 
+sed -i "s|server: .*\$|server: https://${CRC_NAME}.${CRC_NAMESPACE}.svc:6443|" $KUBECONFIGFILE
+
 SHOULD_LOOP=true
 cleanup() {
   echo -e "\nStopping monitoring of OpenShift Routes\n"
