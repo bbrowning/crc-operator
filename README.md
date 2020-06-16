@@ -52,7 +52,6 @@ Deploy the operator
 
 ```
 oc create ns crc-operator
-oc apply -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
 oc apply -f deploy/service_account.yaml
 oc apply -f deploy/role.yaml
 oc apply -f deploy/role_binding.yaml
