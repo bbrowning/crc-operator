@@ -73,7 +73,7 @@ place of `crc` in the commands below.
 
 ```
 oc new-project crc
-./crcStart.sh my-cluster crc pull-secret
+VM_CPUS=4 VM_MEMORY=16Gi ./crcStart.sh my-cluster crc pull-secret
 ```
 
 This script is just a convenience that creates a `CrcCluster` object,
@@ -91,6 +91,13 @@ For developer crc-operator itself, see [DEVELOPMENT.md]().
 
 # Known Issues
 
+- The first time a CrcCluster gets created on any specific Node, it
+  takes a LONG time to pull the CRC VM image from quay.io. There's a
+  planned CrcBundle API that may be able to mitigate this by
+  pre-pulling the VM images into the internal registry. For now, if
+  crcStart.sh times out and this is the first time running a VM on
+  that specific Node, just run the script again with the exact same
+  arguments.
 - The kubeconfigs have an incorrect certificate-authority-data that
   needs to get updated to match the actual cert from the running
   cluster. Should that have changed? Look at
@@ -98,6 +105,11 @@ For developer crc-operator itself, see [DEVELOPMENT.md]().
   for how to add an additional API server certificate with the proper
   name. The operator would need to generate a new cert for the exposed
   API server URL and follow those instructions.
+- The image locations are all hardcoded. This is very temporary, with
+  the first iteration allowing an environment variable in the operator
+  and a later iteration adding a new API to manage multiple CRC VM
+  images where the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc)
+  they want to spin up.
 
 # Other Notes Below
 
