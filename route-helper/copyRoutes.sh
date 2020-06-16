@@ -1,43 +1,54 @@
 #!/usr/bin/env bash
 
-export VM_NAME="$1"
-export VM_NAMESPACE="$2"
+set -e
+set -o pipefail
+
+# This script expects two environment variables to be set:
+#   CRC_NAME: The name of the CRC resource
+#   CRC_NAMESPACE: The namespace of the CRC resource
 
 log () {
   echo "$@"
 }
 
-if [ -z "$VM_NAME" -o -z "$VM_NAMESPACE" ]; then
-  log "Usage: $0 <crc vm name> <crc vm namespace>"
-  log "Example: $0 my-cluster crc"
+if [ -z "${CRC_NAME:-}" -o -z "${CRC_NAMESPACE:-}" ]; then
+  log "CRC_NAME and CRC_NAMESPACE environment variables must be set"
   exit 1
 fi
 
-while [ -z "${ROUTE_DOMAIN}" ]; do
-  export ROUTE_DOMAIN=$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.baseDomain} || echo '')
-done
+ROUTE_DOMAIN=$(oc get crc ${CRC_NAME} -n ${CRC_NAMESPACE} -o jsonpath={.status.baseDomain} || echo '')
 
-if oc api-versions | grep route.openshift.io/v1 1>/dev/null; then
+if oc api-versions | grep route.openshift.io/v1; then
   export IS_OS=true
 else
   export IS_OS=false
 fi
 
-export KUBECONFIGFILE="kubeconfig-${VM_NAME}-${VM_NAMESPACE}"
+KUBECONFIGFILE="/tmp/kubeconfig-${CRC_NAME}-${CRC_NAMESPACE}"
 
-if [ ! -f "${KUBECONFIGFILE}" ]; then
-  log "kubeconfig ${KUBECONFIGFILE} missing - have you used crcStart.sh first?"
-  exit 1
-fi
+oc get crc ${CRC_NAME} -n ${CRC_NAMESPACE} -o jsonpath={.status.kubeconfig} | base64 -d > $KUBECONFIGFILE
 
-export OCCRC="oc --insecure-skip-tls-verify --kubeconfig $KUBECONFIGFILE"
+SHOULD_LOOP=true
+cleanup() {
+  echo -e "\nStopping monitoring of OpenShift Routes\n"
+  SHOULD_LOOP=false
+}
+trap 'cleanup' EXIT
+
+OCCRC="oc --insecure-skip-tls-verify --kubeconfig $KUBECONFIGFILE"
 
 log "> Monitoring OpenShift Routes and configuring networking."
 log "    Press CTRL+C to stop."
 
 declare -A PROXIED_ROUTES
 
-while true; do
+OWNER_REFERENCES="ownerReferences:
+  - apiVersion: apps/v1
+    kind: Deployment
+    name: ${CRC_NAME}-route-helper
+    uid: $(oc get deployment -n ${CRC_NAMESPACE} ${CRC_NAME}-route-helper -o jsonpath={.metadata.uid})"
+
+while $SHOULD_LOOP; do
   while read line; do
     namespace=$(echo "$line" | awk '{print $1}')
     name=$(echo "$line" | awk '{print $2}')
@@ -46,9 +57,8 @@ while true; do
 
     if [ "${PROXIED_ROUTES[$key]}" != "$version" ]; then
       echo "Creating a route for $namespace/$name"
-      routeYaml=$(${OCCRC} get route -n $namespace $name -o yaml)
-      routeHost=$(echo "$routeYaml" | yq r - spec.host)
-      routeTls=$(echo "$routeYaml" | yq r - spec.tls)
+      routeHost=$(${OCCRC} get route -n $namespace $name -o jsonpath={.spec.host})
+      routeTls=$(${OCCRC} get route -n $namespace $name -o jsonpath={.spec.tls})
 
       if [ -z "$routeTls" ]; then
         if ${IS_OS}; then
@@ -56,27 +66,29 @@ while true; do
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: ${VM_NAME}-${name}-${namespace}
-  namespace: ${VM_NAMESPACE}
+  name: ${CRC_NAME}-${name}-${namespace}
+  namespace: ${CRC_NAMESPACE}
+  $OWNER_REFERENCES
 spec:
   host: ${routeHost}
   port:
     targetPort: 80
   to:
     kind: Service
-    name: ${VM_NAME}
+    name: ${CRC_NAME}
 EOF
         else
           cat <<EOF | oc apply -f -
 apiVersion: networking.k8s.io/v1beta1
 kind: Ingress
 metadata:
-  name: ${VM_NAME}-${name}-${namespace}
-  namespace: ${VM_NAMESPACE}
+  name: ${CRC_NAME}-${name}-${namespace}
+  namespace: ${CRC_NAMESPACE}
   annotations:
     kubernetes.io/ingress.allow-http: "true"
     nginx.ingress.kubernetes.io/ssl-passthrough: "true"
     nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+  $OWNER_REFERENCES
 spec:
   rules:
   - host: ${routeHost}
@@ -84,7 +96,7 @@ spec:
       paths:
       - path: /
         backend:
-          serviceName: ${VM_NAME}
+          serviceName: ${CRC_NAME}
           servicePort: 80
 EOF
         fi
@@ -94,15 +106,16 @@ EOF
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: ${VM_NAME}-${name}-${namespace}
-  namespace: ${VM_NAMESPACE}
+  name: ${CRC_NAME}-${name}-${namespace}
+  namespace: ${CRC_NAMESPACE}
+  $OWNER_REFERENCES
 spec:
   host: ${routeHost}
   port:
     targetPort: 443
   to:
     kind: Service
-    name: ${VM_NAME}
+    name: ${CRC_NAME}
   tls:
     termination: passthrough
 EOF
@@ -111,12 +124,13 @@ EOF
 apiVersion: networking.k8s.io/v1beta1
 kind: Ingress
 metadata:
-  name: ${VM_NAME}-${name}-${namespace}
-  namespace: ${VM_NAMESPACE}
+  name: ${CRC_NAME}-${name}-${namespace}
+  namespace: ${CRC_NAMESPACE}
   annotations:
     kubernetes.io/ingress.allow-http: "false"
     nginx.ingress.kubernetes.io/ssl-passthrough: "true"
     nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  $OWNER_REFERENCES
 spec:
   rules:
   - host: ${routeHost}
@@ -124,7 +138,7 @@ spec:
       paths:
       - path: /
         backend:
-          serviceName: ${VM_NAME}
+          serviceName: ${CRC_NAME}
           servicePort: 443
 EOF
         fi

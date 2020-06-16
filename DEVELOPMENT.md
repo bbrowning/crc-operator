@@ -32,3 +32,12 @@ oc logs deployment/crc-operator -n crc-operator -f
 # Create a CrcCluster resource
 oc apply -f deploy/crds/crc.developer.openshift.io_v1alpha1_crccluster_cr.yaml
 ```
+
+
+## Route Helper image
+
+```
+cd route-helper
+podman build . -t quay.io/bbrowning/crc-operator-routes-helper:v0.0.1
+podman push quay.io/bbrowning/crc-operator-routes-helper:v0.0.1
+```

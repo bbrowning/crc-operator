@@ -3,9 +3,11 @@ package crccluster
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -24,9 +26,11 @@ import (
 	routev1Client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
 	"github.com/operator-framework/operator-sdk/pkg/status"
 	"golang.org/x/crypto/ssh"
+	appsv1 "k8s.io/api/apps/v1"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,8 +78,8 @@ func routeAPIExists(mgr manager.Manager) bool {
 	// See if we have OpenShift Route APIs available
 	routeAPIExists := true
 	gvk := schema.GroupVersionKind{
-		Group:   "routes.openshift.io",
-		Kind:    "routes",
+		Group:   "route.openshift.io",
+		Kind:    "Route",
 		Version: "v1",
 	}
 	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
@@ -143,6 +147,16 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// Watch for changes to secondary resource Kubernetes Deployment
+	// and requeue the owner CrcCluster
+	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &crcv1alpha1.CrcCluster{},
+	})
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -304,69 +318,337 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 	}
 
-	if crc.Status.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeReady) {
-		reqLogger.Info("Ensuring ingress controllers updated.")
-		if err := r.ensureIngressControllersUpdated(crc, insecureCrcK8sConfig); err != nil {
-			reqLogger.Error(err, "Error updating ingress controllers.")
-			return reconcile.Result{}, err
-		}
+	reqLogger.Info("Ensuring ingress controllers updated.")
+	if err := r.ensureIngressControllersUpdated(crc, insecureCrcK8sConfig); err != nil {
+		reqLogger.Error(err, "Error updating ingress controllers.")
+		return reconcile.Result{}, err
+	}
 
-		reqLogger.Info("Cleaning up terminating OpenShift router pods.")
-		if err := r.cleanupTerminatingRouterPods(insecureK8sClient); err != nil {
-			reqLogger.Error(err, "Error cleaning up terminating OpenShift router pods.")
-			return reconcile.Result{}, err
-		}
+	reqLogger.Info("Cleaning up terminating OpenShift router pods.")
+	if err := r.cleanupTerminatingRouterPods(insecureK8sClient); err != nil {
+		reqLogger.Error(err, "Error cleaning up terminating OpenShift router pods.")
+		return reconcile.Result{}, err
+	}
 
-		reqLogger.Info("Checking for requestheader-client-ca.")
-		hasRequestCA, err := r.hasRequestHeaderClientCA(insecureK8sClient)
-		if err != nil {
-			reqLogger.Error(err, "Error checking for requestheader-client-ca.")
-			return reconcile.Result{}, err
-		}
-		if !hasRequestCA {
-			reqLogger.Info("No requestheader-client-ca yet - trying again.")
-			return reconcile.Result{RequeueAfter: time.Second * 10}, nil
-		}
+	reqLogger.Info("Checking for requestheader-client-ca.")
+	hasRequestCA, err := r.hasRequestHeaderClientCA(insecureK8sClient)
+	if err != nil {
+		reqLogger.Error(err, "Error checking for requestheader-client-ca.")
+		return reconcile.Result{}, err
+	}
+	if !hasRequestCA {
+		reqLogger.Info("No requestheader-client-ca yet - trying again.")
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+	}
 
-		reqLogger.Info("Waiting on OpenShift API Server to stabilize.")
-		stable, err := r.waitForOpenShiftAPIServer(insecureK8sClient)
-		if err != nil {
-			reqLogger.Error(err, "Error waiting on OpenShift API Server to stabilize.")
-			return reconcile.Result{}, err
-		}
-		if !stable {
-			return reconcile.Result{RequeueAfter: time.Second * 10}, nil
-		}
+	reqLogger.Info("Waiting on OpenShift API Server to stabilize.")
+	stable, err := r.waitForOpenShiftAPIServer(insecureK8sClient)
+	if err != nil {
+		reqLogger.Error(err, "Error waiting on OpenShift API Server to stabilize.")
+		return reconcile.Result{}, err
+	}
+	if !stable {
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+	}
 
-		reqLogger.Info("Updating console route.")
-		consoleRouteUpdated, err := r.updateConsoleRoute(crc, insecureCrcK8sConfig)
-		if err != nil {
-			reqLogger.Error(err, "Error updating console route.")
-			return reconcile.Result{}, err
-		} else if consoleRouteUpdated {
-			return reconcile.Result{RequeueAfter: time.Second * 20}, nil
-		}
+	reqLogger.Info("Updating console route.")
+	consoleRouteUpdated, err := r.updateConsoleRoute(crc, insecureCrcK8sConfig)
+	if err != nil {
+		reqLogger.Error(err, "Error updating console route.")
+		return reconcile.Result{}, err
+	} else if consoleRouteUpdated {
+		return reconcile.Result{RequeueAfter: time.Second * 20}, nil
+	}
 
-		reqLogger.Info("Waiting on cluster to stabilize.")
-		stable, err = r.waitForClusterToStabilize(insecureK8sClient)
-		if err != nil {
-			reqLogger.Error(err, "Error waiting on cluster to stabilize.")
-			return reconcile.Result{}, err
-		}
-		if !stable {
-			return reconcile.Result{RequeueAfter: time.Second * 10}, nil
-		}
+	reqLogger.Info("Waiting on cluster to stabilize.")
+	stable, err = r.waitForClusterToStabilize(insecureK8sClient)
+	if err != nil {
+		reqLogger.Error(err, "Error waiting on cluster to stabilize.")
+		return reconcile.Result{}, err
+	}
+	if !stable {
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+	}
 
-		fmt.Printf("blah blah k8sClient %v\n", k8sClient)
+	reqLogger.Info("Deploying route helper pod.")
+	if err := r.deployRouteHelperPod(crc); err != nil {
+		reqLogger.Error(err, "Error deploying route helper pod.")
+		return reconcile.Result{}, err
+	}
 
+	reqLogger.Info("Waiting on console URL to be available.")
+	consoleUp, err := r.waitForConsoleURL(crc)
+	if err != nil {
+		reqLogger.Error(err, "Error waiting on console URL to be available.")
+		return reconcile.Result{}, err
+	}
+	if consoleUp {
+		reqLogger.Info("Marking CrcCluster as Ready")
 		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
 		crc, err = r.updateCrcClusterStatus(crc)
 		if err != nil {
+			reqLogger.Error(err, "Error updating CrcCluster status")
+			return reconcile.Result{}, err
+		}
+	} else {
+		reqLogger.Info("Marking CrcCluster as NotReady")
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
+		crc, err = r.updateCrcClusterStatus(crc)
+		if err != nil {
+			reqLogger.Error(err, "Error updating CrcCluster status")
 			return reconcile.Result{}, err
 		}
 	}
 
+	fmt.Printf("blah blah k8sClient %v\n", k8sClient)
+
 	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileCrcCluster) waitForConsoleURL(crc *crcv1alpha1.CrcCluster) (bool, error) {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: transport}
+	resp, err := client.Get(crc.Status.ConsoleURL)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *ReconcileCrcCluster) deployRouteHelperPod(crc *crcv1alpha1.CrcCluster) error {
+	if err := r.ensureRouteHelperServiceAccount(crc); err != nil {
+		return err
+	}
+	if err := r.ensureRouteHelperRole(crc); err != nil {
+		return err
+	}
+	if err := r.ensureRouteHelperRoleBinding(crc); err != nil {
+		return err
+	}
+	if err := r.ensureRouteHelperDeployment(crc); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) ensureRouteHelperServiceAccount(crc *crcv1alpha1.CrcCluster) error {
+	labels := map[string]string{
+		"crcCluster": crc.Name,
+	}
+
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-route-helper", crc.Name),
+			Namespace: crc.Namespace,
+			Labels:    labels,
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(crc, sa, r.scheme); err != nil {
+		return err
+	}
+
+	existingSa := &corev1.ServiceAccount{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: sa.Name, Namespace: sa.Namespace}, existingSa)
+	if err != nil && errors.IsNotFound(err) {
+		err = r.client.Create(context.TODO(), sa)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) ensureRouteHelperRole(crc *crcv1alpha1.CrcCluster) error {
+	labels := map[string]string{
+		"crcCluster": crc.Name,
+	}
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-route-helper", crc.Name),
+			Namespace: crc.Namespace,
+			Labels:    labels,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"crc.developer.openshift.io"},
+				Resources: []string{"*"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"deployments"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"networking.k8s.io"},
+				Resources: []string{"ingresses"},
+				Verbs:     []string{"create", "delete", "get", "list", "patch", "update", "watch"},
+			},
+			{
+				APIGroups: []string{"route.openshift.io"},
+				Resources: []string{"routes", "routes/custom-host"},
+				Verbs:     []string{"create", "delete", "get", "list", "patch", "update", "watch"},
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(crc, role, r.scheme); err != nil {
+		return err
+	}
+
+	existingRole := &rbacv1.Role{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: role.Name, Namespace: role.Namespace}, existingRole)
+	if err != nil && errors.IsNotFound(err) {
+		err = r.client.Create(context.TODO(), role)
+		if err != nil {
+			return err
+		}
+		// Get the Role again
+		existingRole = &rbacv1.Role{}
+		err = r.client.Get(context.TODO(), types.NamespacedName{Name: role.Name, Namespace: role.Namespace}, existingRole)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	if !reflect.DeepEqual(role.Rules, existingRole.Rules) {
+		err := r.client.Update(context.TODO(), role)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) ensureRouteHelperRoleBinding(crc *crcv1alpha1.CrcCluster) error {
+	labels := map[string]string{
+		"crcCluster": crc.Name,
+	}
+
+	rb := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-route-helper", crc.Name),
+			Namespace: crc.Namespace,
+			Labels:    labels,
+		},
+	}
+
+	rb.Subjects = []rbacv1.Subject{
+		{
+			Kind:      "ServiceAccount",
+			Name:      rb.Name,
+			Namespace: rb.Namespace,
+		},
+	}
+
+	rb.RoleRef = rbacv1.RoleRef{
+		Kind:     "Role",
+		Name:     rb.Name,
+		APIGroup: "rbac.authorization.k8s.io",
+	}
+
+	if err := controllerutil.SetControllerReference(crc, rb, r.scheme); err != nil {
+		return err
+	}
+
+	existingRb := &rbacv1.RoleBinding{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: rb.Name, Namespace: rb.Namespace}, existingRb)
+	if err != nil && errors.IsNotFound(err) {
+		err = r.client.Create(context.TODO(), rb)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) ensureRouteHelperDeployment(crc *crcv1alpha1.CrcCluster) error {
+	labels := map[string]string{
+		"crcCluster": crc.Name,
+	}
+
+	labelSelector := &metav1.LabelSelector{
+		MatchLabels: labels,
+	}
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-route-helper", crc.Name),
+			Namespace: crc.Namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: labelSelector,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            "route-helper",
+							Image:           "quay.io/bbrowning/crc-operator-routes-helper:v0.0.1",
+							ImagePullPolicy: corev1.PullAlways,
+							Env: []corev1.EnvVar{
+								{
+									Name:  "CRC_NAME",
+									Value: crc.Name,
+								},
+								{
+									Name:  "CRC_NAMESPACE",
+									Value: crc.Namespace,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	deployment.Spec.Template.Spec.ServiceAccountName = deployment.Name
+
+	if err := controllerutil.SetControllerReference(crc, deployment, r.scheme); err != nil {
+		return err
+	}
+
+	existingDeployment := &appsv1.Deployment{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, existingDeployment)
+	if err != nil && errors.IsNotFound(err) {
+		err = r.client.Create(context.TODO(), deployment)
+		if err != nil {
+			return err
+		}
+		// Get the Deployment again
+		existingDeployment = &appsv1.Deployment{}
+		err = r.client.Get(context.TODO(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, existingDeployment)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	if !reflect.DeepEqual(deployment.Spec, existingDeployment.Spec) {
+		fmt.Println("Deployment specs differ, but not updating because it causes an infinite loop until doing a smarter diff.")
+		// err := r.client.Update(context.TODO(), deployment)
+		// if err != nil {
+		// 	return err
+		// }
+	}
+	return nil
 }
 
 func (r *ReconcileCrcCluster) updateCrcClusterStatus(crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {

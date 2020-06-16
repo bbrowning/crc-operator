@@ -25,12 +25,6 @@ fi
 
 oc get namespace ${VM_NAMESPACE} 1>/dev/null
 
-if oc api-versions | grep route.openshift.io/v1 1>/dev/null; then
-  export IS_OS=true
-else
-  export IS_OS=false
-fi
-
 log "> Starting CRC Cluster ${VM_NAME} in namespace ${VM_NAMESPACE} - this can take up to 15 minutes..."
 
 cat <<EOF | oc apply -f -
@@ -62,86 +56,6 @@ done
 echo "${KUBECONFIG_CONTENTS}" | base64 -d > $KUBECONFIGFILE
 
 export OCCRC="oc --insecure-skip-tls-verify --kubeconfig $KUBECONFIGFILE"
-
-while [ -z "${ROUTE_DOMAIN}" ]; do
-  export ROUTE_DOMAIN=$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.status.baseDomain} || echo '')
-done
-
-if ${IS_OS}; then
-  dlog "> Creating OpenShift Routes for console and oauth"
-cat <<EOF | oc apply -f -
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: ${VM_NAME}-apps-oauth
-  namespace: ${VM_NAMESPACE}
-spec:
-  host: oauth-openshift.${ROUTE_DOMAIN}
-  port:
-    targetPort: 443
-  to:
-    kind: Service
-    name: ${VM_NAME}
-  tls:
-    termination: passthrough
----
-apiVersion: route.openshift.io/v1
-kind: Route
-metadata:
-  name: ${VM_NAME}-apps-console
-  namespace: ${VM_NAMESPACE}
-spec:
-  host: console-openshift-console.${ROUTE_DOMAIN}
-  port:
-    targetPort: 443
-  to:
-    kind: Service
-    name: ${VM_NAME}
-  tls:
-    termination: passthrough
-EOF
-else
-  dlog "> Creating Kubernetetes Ingress for console and oauth - this only works with ingress-nginx"
-cat <<EOF | oc apply -f -
-apiVersion: networking.k8s.io/v1beta1
-kind: Ingress
-metadata:
-  name: ${VM_NAME}-apps-oauth
-  namespace: ${VM_NAMESPACE}
-  annotations:
-    kubernetes.io/ingress.allow-http: "false"
-    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-spec:
-  rules:
-  - host: oauth-openshift.${ROUTE_DOMAIN}
-    http:
-      paths:
-      - path: /
-        backend:
-          serviceName: ${VM_NAME}
-          servicePort: 443
----
-apiVersion: networking.k8s.io/v1beta1
-kind: Ingress
-metadata:
-  name: ${VM_NAME}-apps-console
-  namespace: ${VM_NAMESPACE}
-  annotations:
-    kubernetes.io/ingress.allow-http: "false"
-    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-spec:
-  rules:
-  - host: console-openshift-console.${ROUTE_DOMAIN}
-    http:
-      paths:
-      - path: /
-        backend:
-          serviceName: ${VM_NAME}
-          servicePort: 443
-EOF
-fi
 
 
 dlog "> Final stabilization check"
