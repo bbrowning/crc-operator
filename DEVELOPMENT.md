@@ -24,7 +24,7 @@ oc apply -f deploy/role_binding.yaml
 
 # Build and run the operator image
 operator-sdk build quay.io/bbrowning/crc-operator:v0.0.1
-buildah push quay.io/bbrowning/crc-operator:v0.0.1
+podman push quay.io/bbrowning/crc-operator:v0.0.1
 cat deploy/operator.yaml | sed 's|REPLACE_IMAGE|quay.io/bbrowning/crc-operator:v0.0.1|g' | oc apply -f -
 
 oc logs deployment/crc-operator -n crc-operator -f
