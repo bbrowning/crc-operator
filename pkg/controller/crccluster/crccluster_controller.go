@@ -398,6 +398,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 			reqLogger.Error(err, "Error updating CrcCluster status")
 			return reconcile.Result{}, err
 		}
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
 	fmt.Printf("blah blah k8sClient %v\n", k8sClient)
