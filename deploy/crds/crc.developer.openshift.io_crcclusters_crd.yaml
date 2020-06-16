@@ -38,7 +38,7 @@ spec:
                 description: CPU is the number of CPUs to allocate to the cluster
                 type: integer
               memory:
-                default: 12Gi
+                default: 16Gi
                 description: Memory is the amount of memory to allocate to the cluster
                 type: string
               pullSecret:

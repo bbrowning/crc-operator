@@ -23,7 +23,7 @@ type CrcClusterSpec struct {
 	CPU int `json:"cpu"`
 
 	// Memory is the amount of memory to allocate to the cluster
-	// +kubebuilder:default="12Gi"
+	// +kubebuilder:default="16Gi"
 	Memory string `json:"memory"`
 
 	// PullSecret is your base64-encoded OpenShift pull secret
