@@ -1368,7 +1368,10 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 	}
 	vm.Spec.Template.Spec.Domain.CPU = &vmCPU
 
-	guestMemory := resource.MustParse(crc.Spec.Memory)
+	guestMemory, err := resource.ParseQuantity(crc.Spec.Memory)
+	if err != nil {
+		return vm, err
+	}
 	vmMemory := kubevirtv1.Memory{
 		Guest: &guestMemory,
 	}
