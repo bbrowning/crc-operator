@@ -392,7 +392,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 	} else {
 		reqLogger.Info("Marking CrcCluster as NotReady")
-		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, true)
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, false)
 		crc, err = r.updateCrcClusterStatus(crc)
 		if err != nil {
 			reqLogger.Error(err, "Error updating CrcCluster status")
@@ -1425,7 +1425,7 @@ func (r *ReconcileCrcCluster) newServiceForCrcCluster(crc *crcv1alpha1.CrcCluste
 					TargetPort: intstr.FromInt(443),
 				},
 			},
-			Selector: map[string]string{"crcCluster": crc.Name},
+			Selector: map[string]string{"vm.kubevirt.io/name": crc.Name},
 			Type:     corev1.ServiceTypeClusterIP,
 		},
 	}
