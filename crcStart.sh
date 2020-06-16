@@ -7,6 +7,11 @@ export VM_NAMESPACE="$2"
 export PULL_SECRET_FILE="$3"
 DEBUG=${DEBUG:-false}
 
+DEFAULT_VM_CPUS=8
+DEFAULT_VM_MEMORY=16Gi
+VM_CPUS=${VM_CPUS:-$DEFAULT_VM_CPUS}
+VM_MEMORY=${VM_MEMORY:-$DEFAULT_VM_MEMORY}
+
 log () {
   echo "$@"
 }
@@ -20,12 +25,16 @@ dlog () {
 if [ -z "$VM_NAME" -o -z "$VM_NAMESPACE" -o -z "$PULL_SECRET_FILE" -o ! -f "$PULL_SECRET_FILE" ]; then
   log "Usage: $0 <crc vm name> <crc vm namespace> <pull secret file>"
   log "Example: $0 my-cluster crc pull-secret.json"
+  log "----"
+  log "Environment variable overrides"
+  log "VM_CPUS: Change the number of CPUs allocated to the VM (default: ${DEFAULT_VM_CPUS})"
+  log "VM_MEMORY: Change the amount of memory allocated to the VM (example: ${DEFAULT_VM_MEMORY})"
   exit 1
 fi
 
 oc get namespace ${VM_NAMESPACE} 1>/dev/null
 
-log "> Starting CRC Cluster ${VM_NAME} in namespace ${VM_NAMESPACE} - this can take up to 15 minutes..."
+log "> Starting CRC Cluster ${VM_NAME} in namespace ${VM_NAMESPACE} with ${VM_CPUS} CPUs and ${VM_MEMORY} of memory- this can take up to 15 minutes..."
 
 cat <<EOF | oc apply -f -
 apiVersion: crc.developer.openshift.io/v1alpha1
@@ -34,8 +43,8 @@ metadata:
   name: ${VM_NAME}
   namespace: ${VM_NAMESPACE}
 spec:
-  cpu: 8
-  memory: 16Gi
+  cpu: ${VM_CPUS}
+  memory: ${VM_MEMORY}
   pullSecret: $(cat $PULL_SECRET_FILE | base64 -w 0)
 EOF
 
