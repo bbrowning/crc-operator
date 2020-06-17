@@ -88,13 +88,9 @@ KUBEADMIN_PASSWORD="$(oc get crc ${VM_NAME} -n ${VM_NAMESPACE} -o jsonpath={.sta
 
 log "> CRC cluster is up!
 
-Connect as kube:admin on the CLI using:
+Connect as an administrator on the CLI using:
 ${OCCRC}
 
-Connect as developer on the CLI using:
-oc login --insecure-skip-tls-verify ${CRC_API_SERVER} -u developer -p developer
-
 Access the console at: ${CRC_CONSOLE}
-Login as kube:admin with kubeadmin/${KUBEADMIN_PASSWORD}
-Login as developer with developer/developer
+Login as an administrator with username 'admin' and password '${KUBEADMIN_PASSWORD}'
 "

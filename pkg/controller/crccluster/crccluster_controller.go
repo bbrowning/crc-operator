@@ -1,12 +1,15 @@
 package crccluster
 
+// TODO: This should be split out of one giant file, obviously...
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
+	"math/big"
 	"net/http"
 	"os/exec"
 	"reflect"
@@ -25,6 +28,7 @@ import (
 	operatorv1Client "github.com/openshift/client-go/operator/clientset/versioned/typed/operator/v1"
 	routev1Client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
 	"github.com/operator-framework/operator-sdk/pkg/status"
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 	appsv1 "k8s.io/api/apps/v1"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
@@ -48,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -103,7 +108,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to primary resource CrcCluster
-	err = c.Watch(&source.Kind{Type: &crcv1alpha1.CrcCluster{}}, &handler.EnqueueRequestForObject{})
+	err = c.Watch(&source.Kind{Type: &crcv1alpha1.CrcCluster{}}, &handler.EnqueueRequestForObject{}, predicate.GenerationChangedPredicate{})
 	if err != nil {
 		return err
 	}
@@ -238,7 +243,9 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 
 	r.updateVirtualMachineNotReadyCondition(virtualMachine, crc)
 	r.updateNetworkingNotReadyCondition(k8sService, crc)
-	r.updateCredentials(crc)
+	if err := r.updateCredentials(crc); err != nil {
+		return reconcile.Result{}, err
+	}
 
 	crc, err = r.updateCrcClusterStatus(crc)
 	if err != nil {
@@ -248,7 +255,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	// Don't attempt any further reconciling until the VM is ready
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) {
 		reqLogger.Info("Waiting on the VirtualMachine to become Ready before continuing")
-		return reconcile.Result{}, nil
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
 	sshClient, err := createSSHClient(k8sService)
@@ -286,6 +293,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
+		reqLogger.Info("Updating kubeadmin password.")
+		if err := r.updateClusterCredentials(crc, insecureK8sClient); err != nil {
+			reqLogger.Error(err, "Error updating kubeadmin password.")
+			return reconcile.Result{}, err
+		}
+
 		reqLogger.Info("Updating pull secret.")
 		if err := r.updatePullSecret(crc, sshClient, insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error updating pull secret.")
@@ -721,6 +734,60 @@ sudo chmod 0600 /var/lib/kubelet/config.json
 		if _, err := k8sClient.CoreV1().Secrets(openshiftConfigNs).Update(secret); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) updateClusterCredentials(crc *crcv1alpha1.CrcCluster, k8sClient *kubernetes.Clientset) error {
+	secretName := "htpass-secret"
+	openshiftConfigNs := "openshift-config"
+	secret, err := k8sClient.CoreV1().Secrets(openshiftConfigNs).Get(secretName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	passwordHash, err := hashPassword(crc.Status.KubeAdminPassword)
+	if err != nil {
+		return err
+	}
+	// TODO: Need to generate a new kubeconfig here and a cert and/or
+	// token to go along with it
+	htpasswdBytes := []byte("admin:")
+	htpasswdBytes = append(htpasswdBytes, passwordHash...)
+	htpasswdBytes = append(htpasswdBytes, []byte("\n")...)
+	existingHtpasswdBytes, found := secret.Data["htpasswd"]
+	if !found || !bytes.Equal(existingHtpasswdBytes, htpasswdBytes) {
+		secret.Data["htpasswd"] = htpasswdBytes
+		if _, err := k8sClient.CoreV1().Secrets(openshiftConfigNs).Update(secret); err != nil {
+			return err
+		}
+	}
+
+	crbName := "crc-cluster-admin"
+	_, err = k8sClient.RbacV1().ClusterRoleBindings().Get(crbName, metav1.GetOptions{})
+	if err != nil && errors.IsNotFound(err) {
+		crb := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: crbName,
+			},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     "cluster-admin",
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					APIGroup: "rbac.authorization.k8s.io",
+					Kind:     "User",
+					Name:     "admin",
+				},
+			},
+		}
+		_, err = k8sClient.RbacV1().ClusterRoleBindings().Create(crb)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
 	}
 	return nil
 }
@@ -1241,18 +1308,27 @@ func (r *ReconcileCrcCluster) updateNetworkingNotReadyCondition(svc *corev1.Serv
 	}
 }
 
-func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) {
-	if crc.Status.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) &&
-		crc.Status.Conditions.IsFalseFor(crcv1alpha1.ConditionTypeNetworkingNotReady) {
+func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) error {
+	if crc.Status.KubeAdminPassword == "" {
+		kubeAdminPassword, err := generateKubeUserPassword()
+		if err != nil {
+			return err
+		}
+		crc.Status.KubeAdminPassword = kubeAdminPassword
+	}
 
-		crc.Status.KubeAdminPassword = "DEP6h-PvR7K-7fYqe-IhLUP"
-
-		// TODO: This certificate-authority-data doesn't match the
-		// actual cert the user gets when they hit the api server
+	// TODO: Generate a new CSR and key for this user:
+	//openssl req -subj "/CN=cluster-admin" -new -newkey rsa:2048 -nodes -out admin.csr -keyout admin.key
+	// Submit the CSR for approval to the cluster
+	// Update the kubeconfig client-certificate and client-key using the key
+	// from openssl command and cert from CSR approval
+	if crc.Status.Kubeconfig == "" {
+		// TODO: Disable insecure-skip-tls-verify and get the proper
+		// certificate-authority-data from the cluster
 		crc.Status.Kubeconfig = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`apiVersion: v1
 clusters:
 - cluster:
-    certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM3VENDQWRXZ0F3SUJBZ0lCQVRBTkJna3Foa2lHOXcwQkFRc0ZBREFtTVNRd0lnWURWUVFEREJ0cGJtZHkKWlhOekxXOXdaWEpoZEc5eVFERTFPVEV6TlRneE5UTXdIaGNOTWpBd05qQTFNVEUxTlRVeVdoY05Nakl3TmpBMQpNVEUxTlRVeldqQW1NU1F3SWdZRFZRUUREQnRwYm1keVpYTnpMVzl3WlhKaGRHOXlRREUxT1RFek5UZ3hOVE13CmdnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURTOUtJNFhUZHJRblMvTkdGS2thTGcKZStvdmEwSWxHYjNsbE5QVnJnZTBwdlNGNTRUakFUQlpOc2hOekRQN1huVkRYUFZ0VlU4OXNMTHZjZDJDSHFLaApSR1pHdnFCMGJlTmowZ2dnTlNWU3RBc1NCUSt2Smp2TTN2bS91R25nR3FxZGdXcUdPbGV1YUoxUlNTZUZwa2VLCmIvMGttbFZWRStoUHVZbXFjL1ErditiU0w0Um5Fb2pSRGU2QzdtZ2U4M2pGd0xmTjJjR3dpVjFjUG9kZFgrVEYKb2F5Y0xVaEh0SjZnTVN6SkZ1c1Z4Z3RPOFpRdkR1UXRPQ0ZLVUhWS2NDM3JpR096VUE3WkxxMWF3ZzRVRmJJTgoxODl4QkhPRnNlZWE5RjRXckZJWXBEZVF6a3BUeHJ2VnBuZ2wyRkZ3eGNTU1hLL0Y2WFZtY3g1SFNnZEsrY3pCCkFnTUJBQUdqSmpBa01BNEdBMVVkRHdFQi93UUVBd0lDcERBU0JnTlZIUk1CQWY4RUNEQUdBUUgvQWdFQU1BMEcKQ1NxR1NJYjNEUUVCQ3dVQUE0SUJBUUJlMjZmUnFsZFhFdE5mWEdYaVhtYStuaVhnMmRtQ2g2azdXYUNrMkdGNgpHbHhZMDNkcmNYeXpwUzRTT2Rac2VqaVBwVU9ubTgwdnZBai9LaWZmakxDUDIvUDBUT2w3cCtlNTBFbGFaZVIvCjMxRjRDMzdZYW5VbFV3YVVUblFtUXRSd002Szl2QWRiRUZ5SWVHV1AraU04TFFFUnRYRXA4M0tJS1BQbjVPd2YKNjBrUXBLSWRKL2ttR3pwRUllS0FVTmpITTgyM01JU3FZd21yVDN3elBmankxZEpyeUtXNGdLazZTVmJqVUZXTwp6UFpyMVk0Tmd0aG5HSFRvbnhNYWkxRDhZa2cvM3k0TWt3Q3FKWHk0ZlJEdnRpMklMaG5xNWx4RExzOThwaU1BCmRhMVdveWNHSlNWdHYySHkwKzg2amNFelo3T01mRGllSnRRdVpaUzgrdjVKCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0KLS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM3VENDQWRXZ0F3SUJBZ0lCQVRBTkJna3Foa2lHOXcwQkFRc0ZBREFtTVNRd0lnWURWUVFEREJ0cGJtZHkKWlhOekxXOXdaWEpoZEc5eVFERTFPVEV6TlRneE5UTXdIaGNOTWpBd05qQTFNVEUxTlRVeVdoY05Nakl3TmpBMQpNVEUxTlRVeldqQW1NU1F3SWdZRFZRUUREQnRwYm1keVpYTnpMVzl3WlhKaGRHOXlRREUxT1RFek5UZ3hOVE13CmdnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURTOUtJNFhUZHJRblMvTkdGS2thTGcKZStvdmEwSWxHYjNsbE5QVnJnZTBwdlNGNTRUakFUQlpOc2hOekRQN1huVkRYUFZ0VlU4OXNMTHZjZDJDSHFLaApSR1pHdnFCMGJlTmowZ2dnTlNWU3RBc1NCUSt2Smp2TTN2bS91R25nR3FxZGdXcUdPbGV1YUoxUlNTZUZwa2VLCmIvMGttbFZWRStoUHVZbXFjL1ErditiU0w0Um5Fb2pSRGU2QzdtZ2U4M2pGd0xmTjJjR3dpVjFjUG9kZFgrVEYKb2F5Y0xVaEh0SjZnTVN6SkZ1c1Z4Z3RPOFpRdkR1UXRPQ0ZLVUhWS2NDM3JpR096VUE3WkxxMWF3ZzRVRmJJTgoxODl4QkhPRnNlZWE5RjRXckZJWXBEZVF6a3BUeHJ2VnBuZ2wyRkZ3eGNTU1hLL0Y2WFZtY3g1SFNnZEsrY3pCCkFnTUJBQUdqSmpBa01BNEdBMVVkRHdFQi93UUVBd0lDcERBU0JnTlZIUk1CQWY4RUNEQUdBUUgvQWdFQU1BMEcKQ1NxR1NJYjNEUUVCQ3dVQUE0SUJBUUJlMjZmUnFsZFhFdE5mWEdYaVhtYStuaVhnMmRtQ2g2azdXYUNrMkdGNgpHbHhZMDNkcmNYeXpwUzRTT2Rac2VqaVBwVU9ubTgwdnZBai9LaWZmakxDUDIvUDBUT2w3cCtlNTBFbGFaZVIvCjMxRjRDMzdZYW5VbFV3YVVUblFtUXRSd002Szl2QWRiRUZ5SWVHV1AraU04TFFFUnRYRXA4M0tJS1BQbjVPd2YKNjBrUXBLSWRKL2ttR3pwRUllS0FVTmpITTgyM01JU3FZd21yVDN3elBmankxZEpyeUtXNGdLazZTVmJqVUZXTwp6UFpyMVk0Tmd0aG5HSFRvbnhNYWkxRDhZa2cvM3k0TWt3Q3FKWHk0ZlJEdnRpMklMaG5xNWx4RExzOThwaU1BCmRhMVdveWNHSlNWdHYySHkwKzg2amNFelo3T01mRGllSnRRdVpaUzgrdjVKCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0KLS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURRRENDQWlpZ0F3SUJBZ0lJTGlKYklDbE9RaEl3RFFZSktvWklodmNOQVFFTEJRQXdQakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TZ3dKZ1lEVlFRREV4OXJkV0psTFdGd2FYTmxjblpsY2kxc2IyTmhiR2h2YzNRdApjMmxuYm1WeU1CNFhEVEl3TURZd05URXhNVGcxTlZvWERUTXdNRFl3TXpFeE1UZzFOVm93UGpFU01CQUdBMVVFCkN4TUpiM0JsYm5Ob2FXWjBNU2d3SmdZRFZRUURFeDlyZFdKbExXRndhWE5sY25abGNpMXNiMk5oYkdodmMzUXQKYzJsbmJtVnlNSUlCSWpBTkJna3Foa2lHOXcwQkFRRUZBQU9DQVE4QU1JSUJDZ0tDQVFFQTdMQXlHY3NiaUc1OApDSzRUUUZQQ3cwVUc3ems0SVhTTDlKV0U1SjlMUHQycW12azdjR2hLTnlGL0NIZElodk0zY2tZM2dLcnhkSlZMCjhLWnJYbUxnRVlXM1hUYzFMWjc5TG5UQmt0RWFVMTFvVU1kMkVFaUh2WFVrSFJKaUNNNzFhOTZQOEFkZUZFQloKNEhnQkR5V3ZGcUFFWWlpSnc4M1hxYUVNdXBGUDJFM0ZTTjEra291Sk9BbE1OaDZHcEdvdVlNMGlMek5SKzVtSQpvRFdKUW92bk9OWlorb0l0MDBEQ1kwZHA5V3FqWEhGSzZuNmg5QXNldG4yS0dmZkVKS2ZoQzdOWDBnRW9yK1dICk5wa3Z6SG4wRjlaSkRjUGtoYm0vcHM0TGdDcWdMalBhTkR3RTFsMmZBNjkwTkJJZVZtQ0gxaGZ2SlhYM0ozbzEKVkV4UC80T3gzd0lEQVFBQm8wSXdRREFPQmdOVkhROEJBZjhFQkFNQ0FxUXdEd1lEVlIwVEFRSC9CQVV3QXdFQgovekFkQmdOVkhRNEVGZ1FVM2NCcEsrb2wweTFmZ211UUhnTE1xeDRFNW9Bd0RRWUpLb1pJaHZjTkFRRUxCUUFECmdnRUJBRFF5QkI0eUNjYjBvZmtpODZCU2piODJydVc2ckFoWVQ0cTljZnJWY2ZhdEs0ZURxSFAzMWROQTdRUmEKeFdmbCtsMFd6dkVmT2dVOGMxUDhSRE1NampubitteDdobnZOaUgwQ0xnL3R1RUFmRlZzZFZKYlNqMk5rZTAxRwpTN09RUkVmOGJkQklucmNkM0xiYThMU084MDhic0V0WmdnZG13RndBUWsvdWRYN1d2SUlQVkppeTZCeGpWZ0FWClJYaDZFcUxQaUlWTDJ3b0YwVGNHSXpGNE5UMlUzcWNLM2NKdUVjM1lzdkkrck1tWEJDT25FY0N2MzB2a1d0NmsKNnV4cEdOWGxidlRxekZTY3NZL09zZEVUeGpBVHhxTUEzZ2FLR000OTFnM3REUXhaUVNNRlJTMjRMYlFhSjJDQgpFbWUzMFhlempvdTNUNytyVWx1S1dCd3luUzg9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0KLS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURURENDQWpTZ0F3SUJBZ0lJTUwzZTJ4ZG9Xd0F3RFFZSktvWklodmNOQVFFTEJRQXdSREVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TNHdMQVlEVlFRREV5VnJkV0psTFdGd2FYTmxjblpsY2kxelpYSjJhV05sTFc1bApkSGR2Y21zdGMybG5ibVZ5TUI0WERUSXdNRFl3TlRFeE1UZzFOVm9YRFRNd01EWXdNekV4TVRnMU5Wb3dSREVTCk1CQUdBMVVFQ3hNSmIzQmxibk5vYVdaME1TNHdMQVlEVlFRREV5VnJkV0psTFdGd2FYTmxjblpsY2kxelpYSjIKYVdObExXNWxkSGR2Y21zdGMybG5ibVZ5TUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQwpBUUVBeDNGL3pVd0tZanMvSDZIaG9NWWxqamlRVDg0eklMOGVTVmZGVEZJMVUwZVcxbDV1akp2Wlk3bDRnZyt3CmlybEtFRUtoWmtXNUpWbEZwaVpxbW8yR0lPc3JJWGoxL0Fpc1VVcWdXUUtEWHVDUnhWNitCeE5xM1Z6d1VJUDYKNDA4L2o4Z0tPZGp6NVRTTFUwa0VIYmVLc0FYYmNZSUVYQXorTDBEdFo4WWx0NnpJc2hjaCs0RGxMUDR3R0NVMAowNWx3d2dEcUZUOE1lUEhzb0pISFRTcDFxT0V4Z2E5bjBzTGMxTGFXUkJabzBGMmNleWVqdy95bUlwUkNpVHc4CmZvR0cwYm4ydWZFOG9TWkRpMUZSa0JJQ2puNWlLdlkxNFR0VVpCN2RiMXFlZmZ5MStmZThJTElRdEphcStVaDkKL3R2QnUyYVJITlQyWnV1MUNvRDNlaWhqdlFJREFRQUJvMEl3UURBT0JnTlZIUThCQWY4RUJBTUNBcVF3RHdZRApWUjBUQVFIL0JBVXdBd0VCL3pBZEJnTlZIUTRFRmdRVXJpbGxEUHhFVHFQbVVuUHZrWTArSVBvYXErTXdEUVlKCktvWklodmNOQVFFTEJRQURnZ0VCQU1TTExxR0NObmhEZUhScWtaUWEvNktUR21KZVpEc1F3MURHRUpYc1VMVloKcXpRODFjZUtreEVDQVByK2hzcmRORVB6bEhDbUpGQXVYczBXQ0lRN1NvaUNJcmYzQnV6cVNIK2QxME9sZjlkdApXS1lSTmg1UXVaODgxWWhDNDZsZ3hZVjk5RjU3WW5ROG8rellaN2ZDUTMreGRGbytudXNRYys4K2tQM1VGcUJtCjd4Q2V2MmtJUm1RT005c05WUTcrdnBkb2I2dTJwN1VLSFplQmd6Q2h2ODhXclF4M2lIOUlob2J5bnkyREk1Y1UKS1BQbWNVQlY1Y2pualZkVVp2SW1wNDVqcEwvWUNLam5OQjNWNmVOQ2ROSnozZWh4Y3B2bFFMdVgycUhGdzdGTQozRWU1UlRMbnl6SEFTVFQramRJQUVvUUpTSnNHNFJiZ0g3WDVZd2laVDI0PQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCi0tLS0tQkVHSU4gQ0VSVElGSUNBVEUtLS0tLQpNSUlETWpDQ0FocWdBd0lCQWdJSUczR3l1WWpVaU9nd0RRWUpLb1pJaHZjTkFRRUxCUUF3TnpFU01CQUdBMVVFCkN4TUpiM0JsYm5Ob2FXWjBNU0V3SHdZRFZRUURFeGhyZFdKbExXRndhWE5sY25abGNpMXNZaTF6YVdkdVpYSXcKSGhjTk1qQXdOakExTVRFeE9EVTJXaGNOTXpBd05qQXpNVEV4T0RVMldqQTNNUkl3RUFZRFZRUUxFd2x2Y0dWdQpjMmhwWm5ReElUQWZCZ05WQkFNVEdHdDFZbVV0WVhCcGMyVnlkbVZ5TFd4aUxYTnBaMjVsY2pDQ0FTSXdEUVlKCktvWklodmNOQVFFQkJRQURnZ0VQQURDQ0FRb0NnZ0VCQU03K1J1Y3pEWUpXVjAvK1FHaHNuTUUrV2dlcUJERS8KNDkrSUkyUEttL01rV0NDTlRYNU1yM05mZ0RKSDlMRDBRRzZMZlc3Q0lVWFZjeWZ4ZDd1WVNETERwVmJJSVRyQgpoa1g0WmdtQTd6d09RcUQ4SElhZUp0QmJ5ZnhaWFpBbkNoSlVMU2JscDFYa2NnTEVlVm5hTHZwOVF6QkpCOHRDCmRPczRqbFpkSmRXcm9GYlZJUUVJRHBYT0k4L0diY0dZTXd6cXRiNFRzUVFzNWZ6MG5FVlI0eXoveE9wN0xRQ1EKbVlwWER4cUhFbzVXb0w1Vk5YSGZmWUVRRE9WeVlTeDNEL21FYkd1QzNrUWdXd3F1LzFZeU1sbkFVN2djbDNMWQovSFg1bVRmSVRKVG1VKzJlOHFoNHZMTEVMckVVU2E4alVzR1cyUHIvSmx1NklPei9kR3d0OTdVQ0F3RUFBYU5DCk1FQXdEZ1lEVlIwUEFRSC9CQVFEQWdLa01BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0hRWURWUjBPQkJZRUZDR0UKcmpMWk1wNk41a202NWZZUWVQalNnaDVqTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFCMm1LVVRqNi9WUG5VRQoyeUI3NEtPQ3VBaldkU1JrVHpGU3JCNTFmZHBkQmZJSU1mRDRYai9ZRUkxSDZQQ2dZS2lzbWpaRUJ1QVNHQzNBCnNUNjBCVDFJQmFERG9PeWlOelhUUFdTRlVEUkFYeUYzWkJrVGlYM2JjTU9WRzI3VDBXRVRLU1Y3Q2N3N0pPcWEKSXJpQkJpc25RVUlhV0R3SnhEdm5ZUXNBendOWWVBNjRzdDhHNkRWaVF1ZkV1SFpBT0VUYXo5ek55NnNhd2ErUApjUUxVZTFsaVFSNk1EWjhGY2tPL1UxNURyeE16MVBJeUNiRW43LzVGVzFsL0lENkZBM05MQ3Yxa1hvTVdXd0dVCmpIYzRQMmZzVHBGbStGODNsdDlDcCtQWU92N1Jkdm1QQytUTSs1NW45djVES2p1SkVBZWtyNUdsN0NZcVJxaU8KTjdXdzNMc0YKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+    insecure-skip-tls-verify: true
     server: %s
   name: crc
 contexts:
@@ -1270,6 +1346,8 @@ users:
     client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBN0Q2dTArbGVmeU1wZHlVODQvdWd4L0lWWXhpaFVIeFNzSzVNcmVkeXU1SmJpWnFyCm1NeHorZEI4ZlErK2xtbE54TXEzeU9ZcnRDQlBGMndNUDBmcGpuT3dHdnZLNHpJbTAxdUQ2cFNGY0FEQVBTdkMKNjVaeGxhNkw0bVFoY0FYTk54bUNCQ1R3aUg4L1BwMlF2TENTdEpSWnNsZVNSZStPeTNBNnl3a3JtQWF3ODRHNQptemF1WEdjRDAvdno3UG9LT3pyZTdzb2NKNFo4SDgvdGtaUUYyWmRqTis1MFhCU1BJQUk3T1gvT1VUQk5qSHpYCkU3eXY5Vm1QR0F4VVFuekF5bTBMRGhnbFV0YXcxczlHOVlrVUNxeDAxa1dRbHJORmdKT0NYVGZQSjB4TFZRYXAKR1hTYjdaVUhJQVJzM2RZZW1PUkdGWC9RdTQvYWJjQXJIOUlZOXdJREFRQUJBb0lCQUNlSWljc09kM0RCR3BSRQpsLzd5d2NJVDRiNVdoZEFwTGRGQktiWEVVRy9SR3g1WTByUmNLbUE0b2t4dlVRNXNpc1lPd2xpTkkrMGRwdjZkClp5TkR6bkszSzFZb29wZ0ljWFRYRUtrMXQycTV4WEczSEFRK2hiMXRteDBFY3BBRGVJYnE3dFh3dEl1eTk0dHIKNUtlZXlMNE5RVUZWNURWdDFEQjVGRzJibUQ3MU5XRW5KNFhncTUxNUxkY2VUS1dBbm92NURmbmVNcXJqU21oUgpHeHV4RnorbVZyeUowUVIyL3JZY1l5cWRsZFJKQ2REcFdGRndSdDRVbmlLaHVHdEhGZlpTU2ZYU2QvYmhRbnUwCmtmbWh5OFlMMFpURUkvSE9pVWdBUzhFUHVWbWhsbmRESkwxY2ZoRUJNaFQvYXd1TDYvQklZS3gyWWJNTmpjZUUKbjdwVzlRa0NnWUVBK045enRRU296Z3JBYWwyV1Z1ei9rWENsMzlmd0VjZFpaUXV2b2MxaU5ZU1NtUzVLanFtbQpjSmRGNFd6bG0yUUJnUllFT044RE1vL3RQNmF3MmFiYjQ4SW1FYlRjKzFodzJBUThHSGpYNXlqTFkvM0VrT1FxCi9QNWE3QXFhbU9udS83TnplU1FYZERwQzhiWnZsNm5wdkVzallEZi95dWVnVmR6VmRMSktDK01DZ1lFQTh3S20KNWE1NTNDa2I5YUxXbVFOUGFqd25ZVXRHaG5EQUhvaThEV0E4ZTVxYzg1MHRSNTBBVDVNazhYVUF0YjRJbFkvUgpVS3FYY3U0blU5Tk9rYmVndmJoZWZ6ZDNyR0xPQkdlQUhqWmptUTV0T1hMT1Z4SVFJdElvRVBVTGtSclJrRDB2CjF5eVdZYXdhQXlka213Nk5haEowbldQRUxnbU1TcXlqZlBWMnN0MENnWUVBamJ0Yi91d3ZZbUFYSXJ3M29UdUoKZEgrdHg2UUhrV2h4VGExeEVYbVJBNStEaVg4bWNNYkhCZm53anlmZ1B6V2Q4YkRqS0t4QSt1dWlsb3hNelRkTQpwUkh0Y2tvSlM0OGJmTG8wcTA4dXpmT2FtVkJ0UUlMZ3hJSHFyK0IrR0xXcEtiQStBL0I4OXZFekxNclVGSkJzCmo1SlBERDM0QzhzTHNicDVTZU03YmpjQ2dZRUEzSmVFcnl4QnZHT28yTUszc1BCN1Q0RkpjaDFsNkxaQy83UzUKbUI3SzZKMENhblk4V3l5ZTBwMU14TTZrRlZacTduRTkzYzd0YWN2YjhWRDRtbmdwTnU4OUFKaDJUd3JsM3NPaApYa3VhLzU1RDhnbFFXMk92T0J5emVDa3BGZEJWZVd6Qmw3OEd4NlQxZS9WdmN2Mnp5eHp6dE1lU2x3UGQwUStECjNQUHBpeFVDZ1lBRVE5VFI4Z0s0V0NuTUxWSUxzWGZUUlVEdjRram9Ob3prT0JwVG5nejN4T0dRNW9vajNMVm0KTEtJU1VTeU15SkJNRCtNU2dnMVd1SkEzYUdGTWdMcndnRS9HaXQvTEtjaW8rMjFUVjdUQUtsZWJJMGd5SFdGbgpRSEtmOWVrTTl3Ym5xa0VPUmJ1cUJ0UUxsTWJjeXI0cHF0V3FjU3lkd1M5czllL2hTaGVCMWc9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
 `, crc.Status.APIURL)))
 	}
+
+	return nil
 }
 
 // TODO: Obviously none of the hardcoded image/cpu/memory values below
@@ -1614,4 +1692,52 @@ DFJEMUnvRq2X433USHAuY1yMZ4b8BWHx/67SbJLgkwq/NwUBKQEVCIHtp6IbKo3cPaymJA
 
 func consoleHost(baseDomain string) string {
 	return fmt.Sprintf("console-openshift-console.%s", baseDomain)
+}
+
+func generateKubeUserPassword() (string, error) {
+	return generateRandomPasswordHash(23)
+}
+
+func hashPassword(password string) ([]byte, error) {
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+}
+
+//
+// Password generation below totally ripped from:
+// https://github.com/openshift/installer/blob/92725a407d518d75ce515131bb52ab94df852c3d/pkg/asset/password/password.go
+//
+
+// generateRandomPasswordHash generates a hash of a random ASCII password
+// 5char-5char-5char-5char
+func generateRandomPasswordHash(length int) (string, error) {
+	const (
+		lowerLetters = "abcdefghijkmnopqrstuvwxyz"
+		upperLetters = "ABCDEFGHIJKLMNPQRSTUVWXYZ"
+		digits       = "23456789"
+		all          = lowerLetters + upperLetters + digits
+	)
+	var password string
+	for i := 0; i < length; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(all))))
+		if err != nil {
+			return "", err
+		}
+		newchar := string(all[n.Int64()])
+		if password == "" {
+			password = newchar
+		}
+		if i < length-1 {
+			n, err = rand.Int(rand.Reader, big.NewInt(int64(len(password)+1)))
+			if err != nil {
+				return "", err
+			}
+			j := n.Int64()
+			password = password[0:j] + newchar + password[j:]
+		}
+	}
+	pw := []rune(password)
+	for _, replace := range []int{5, 11, 17} {
+		pw[replace] = '-'
+	}
+	return string(pw), nil
 }
