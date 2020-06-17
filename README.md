@@ -38,7 +38,7 @@ You also need a functioning install of [Container-native
 Virtualization](https://docs.openshift.com/container-platform/4.4/cnv/cnv_install/installing-container-native-virtualization.html)
 on OpenShift or
 [KubeVirt](https://kubevirt.io/user-guide/#/installation/installation)
-(on Kubernetes).
+on Kubernetes.
 
 ### Deploy the operator
 
@@ -55,7 +55,7 @@ oc create ns crc-operator
 oc apply -f deploy/service_account.yaml
 oc apply -f deploy/role.yaml
 oc apply -f deploy/role_binding.yaml
-cat deploy/operator.yaml | sed 's|REPLACE_IMAGE|quay.io/bbrowning/crc-operator:v0.0.1|g' | oc apply -f -
+of apply -f deploy/operator.yaml
 ```
 
 Ensure the operator comes up with no errors in its logs
@@ -73,21 +73,66 @@ place of `crc` in the commands below.
 
 ```
 oc new-project crc
-VM_CPUS=4 VM_MEMORY=16Gi ./crcStart.sh my-cluster crc pull-secret
+
+cat <<EOF | oc apply -f -
+apiVersion: crc.developer.openshift.io/v1alpha1
+kind: CrcCluster
+metadata:
+  name: my-cluster
+  namespace: crc
+spec:
+  cpu: 4
+  memory: 16Gi
+  pullSecret: $(cat $PULL_SECRET_FILE | base64 -w 0)
+EOF
+
+oc wait --for=condition=Ready crc/my-cluster -n crc --timeout=1800s
 ```
 
-This script is just a convenience that creates a `CrcCluster` object,
-waits for it to be Ready, and then prints the details for connecting
-to that cluster.
+On reasonably sized Nodes, the CRC cluster usually comes up in 7-8
+minutes. The very first time a CRC cluster is created on a Node, it
+can take quite a bit longer while the CRC VM image is pulled into the
+container image cache on that Node.
 
-It will take 5-15 minutes for the cluster to come up, depending on
-your node sizes. If the script hangs, fails, or otherwise something
-broke check the operator pod logs and known issues below for clues on
-what went wrong.
+If the CRC cluster never becomes Ready, check the operator pod logs
+(as shown in the installation section above) and the known issues list
+below for any clues on what went wrong.
+
+## Access the CRC cluster
+
+Once your new cluster is up and Ready, the CrcCluster resource's
+status block has all the information needed to access it.
+
+
+### Log in to the web console:
+
+Console URL:
+
+```
+oc get crc my-cluster -n crc -o jsonpath={.status.consoleURL}
+```
+
+Kubeadmin Password:
+
+```
+oc get crc my-cluster -n crc -o jsonpath={.status.kubeAdminPassword}
+```
+
+Log in as the user kubeadmin with the password from above.
+
+### Access the cluster from the command line using oc:
+
+Extract the kubeconfig to a `kubeconfig-crc` file in the current
+directory and use that to access the cluster:
+
+```
+oc get crc my-cluster -n crc -o jsonpath={.status.kubeconfig} | base64 -d > kubeconfig-crc
+oc --kubeconfig kubeconfig-crc get pod --all-namespaces
+```
 
 # Development
 
-For developer crc-operator itself, see [DEVELOPMENT.md]().
+For tips on developing crc-operator itself, see [DEVELOPMENT.md]().
 
 # Known Issues
 
@@ -110,123 +155,3 @@ For developer crc-operator itself, see [DEVELOPMENT.md]().
   and a later iteration adding a new API to manage multiple CRC VM
   images where the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc)
   they want to spin up.
-
-# Other Notes Below
-
-These are mainly Ben's notes put somewhere more public. They may not
-be entirely accurate or easy to follow for anyone else yet.
-
-## Building CRC container images for CNV
-
-Build your own qcow2 files using https://github.com/code-ready/snc/,
-copy them into bundle-containers/, and build a container image. The
-actual images aren't stored in git since they're so large, and you may
-need to pick one of the Dockerfiles in bundle-containers/ and modify
-for your VM image.
-
-### Changes needed for CRC images running inside CNV
-
-$ git --no-pager diff
-diff --git a/createdisk.sh b/createdisk.sh
-index 87abd48..2d12dc8 100755
---- a/createdisk.sh
-+++ b/createdisk.sh
-@@ -387,23 +387,23 @@ create_qemu_image $libvirtDestDir
- 
- copy_additional_files $1 $libvirtDestDir
- 
--tar cJSf $libvirtDestDir.$crcBundleSuffix $libvirtDestDir
--
--# HyperKit image generation
--# This must be done after the generation of libvirt image as it reuse some of
--# the content of $libvirtDestDir
--hyperkitDestDir="crc_hyperkit_${destDirSuffix}"
--mkdir $hyperkitDestDir
--generate_hyperkit_directory $libvirtDestDir $hyperkitDestDir $1
--
--tar cJSf $hyperkitDestDir.$crcBundleSuffix $hyperkitDestDir
--
--# HyperV image generation
-+#tar cJSf $libvirtDestDir.$crcBundleSuffix $libvirtDestDir
- #
--# This must be done after the generation of libvirt image as it reuses some of
--# the content of $libvirtDestDir
--hypervDestDir="crc_hyperv_${destDirSuffix}"
--mkdir $hypervDestDir
--generate_hyperv_directory $libvirtDestDir $hypervDestDir
--
--tar cJSf $hypervDestDir.$crcBundleSuffix $hypervDestDir
-+## HyperKit image generation
-+## This must be done after the generation of libvirt image as it reuse some of
-+## the content of $libvirtDestDir
-+#hyperkitDestDir="crc_hyperkit_${destDirSuffix}"
-+#mkdir $hyperkitDestDir
-+#generate_hyperkit_directory $libvirtDestDir $hyperkitDestDir $1
-+#
-+#tar cJSf $hyperkitDestDir.$crcBundleSuffix $hyperkitDestDir
-+#
-+## HyperV image generation
-+##
-+## This must be done after the generation of libvirt image as it reuses some of
-+## the content of $libvirtDestDir
-+#hypervDestDir="crc_hyperv_${destDirSuffix}"
-+#mkdir $hypervDestDir
-+#generate_hyperv_directory $libvirtDestDir $hypervDestDir
-+#
-+#tar cJSf $hypervDestDir.$crcBundleSuffix $hypervDestDir
-diff --git a/install-config.yaml b/install-config.yaml
-index 1f40676..e3705ae 100644
---- a/install-config.yaml
-+++ b/install-config.yaml
-@@ -15,12 +15,12 @@ metadata:
-   name: crc
- networking:
-   clusterNetwork:
--  - cidr: 10.128.0.0/14
-+  - cidr: 10.116.0.0/14
-     hostPrefix: 23
-   machineCIDR: 192.168.126.0/24
-   networkType: OpenShiftSDN
-   serviceNetwork:
--  - 172.30.0.0/16
-+  - 172.25.0.0/16
- platform:
-   libvirt:
-     URI: qemu+tcp://192.168.122.1/system
-diff --git a/snc.sh b/snc.sh
-index d93fb6e..d6a6c02 100755
---- a/snc.sh
-+++ b/snc.sh
-@@ -249,6 +249,23 @@ ${YQ} write --inplace ${INSTALL_DIR}/manifests/cluster-ingress-02-config.yml spe
- ${YQ} write --inplace ${INSTALL_DIR}/openshift/99_openshift-cluster-api_master-machines-0.yaml spec.providerSpec.value[domainMemory] 14336
- ${YQ} write --inplace ${INSTALL_DIR}/openshift/99_openshift-cluster-api_master-machines-0.yaml spec.providerSpec.value[domainVcpu] 6
- 
-+cat <<EOF > ${INSTALL_DIR}/manifests/cluster-network-03-config.yml
-+apiVersion: operator.openshift.io/v1
-+kind: Network
-+metadata:
-+  name: cluster
-+spec:
-+  clusterNetwork:
-+  - cidr: 10.116.0.0/14
-+    hostPrefix: 23
-+  serviceNetwork:
-+  - 172.25.0.0/16
-+  defaultNetwork:
-+    type: OpenShiftSDN
-+    openshiftSDNConfig:
-+      mtu: 1400
-+EOF
-+
- # Add codeReadyContainer as invoker to identify it with telemeter
- export OPENSHIFT_INSTALL_INVOKER="codeReadyContainers"
-
-
-### Uploading a custom VM image as a container
-
-    cp /path/to/my/my-image bundle-containers/crc_4.4.5_serviceNetworkMtuCidr.qcow2
-    pushd bundle-containers
-    buildah bud -t quay.io/bbrowning/crc_bundle_4.4.5 -f Dockerfile_v4.4.5
-    buildah push quay.io/bbrowning/crc_bundle_4.4.5
-    popd bundle-containers
-
