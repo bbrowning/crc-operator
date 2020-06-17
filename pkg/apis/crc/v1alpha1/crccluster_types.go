@@ -73,6 +73,10 @@ type CrcClusterStatus struct {
 	// cluster as an administrator
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 
+	// KubeAdminClientKey is the base64-encoded client key to connect
+	// to the cluster as an administrator.
+	KubeAdminClientKey string `json:"kubeAdminClientKey,omitempty"`
+
 	// KubeAdminPassword is the password to connect to the cluster as an administrator
 	KubeAdminPassword string `json:"kubeAdminPassword,omitempty"`
 

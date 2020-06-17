@@ -293,9 +293,9 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
-		reqLogger.Info("Updating kubeadmin password.")
-		if err := r.updateClusterCredentials(crc, insecureK8sClient); err != nil {
-			reqLogger.Error(err, "Error updating kubeadmin password.")
+		reqLogger.Info("Updating cluster admin password.")
+		if err := r.updateClusterAdminUser(crc, insecureK8sClient); err != nil {
+			reqLogger.Error(err, "Error updating cluster admin password.")
 			return reconcile.Result{}, err
 		}
 
@@ -309,6 +309,13 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		crc, err = r.updateClusterID(crc, insecureCrcK8sConfig)
 		if err != nil {
 			reqLogger.Error(err, "Error updating cluster ID.")
+			return reconcile.Result{}, err
+		}
+
+		reqLogger.Info("Updating cluster admin client certificate.")
+		crc, err = r.updateClusterAdminCert(crc, insecureK8sClient)
+		if err != nil {
+			reqLogger.Error(err, "Error updating cluster admin client certificate.")
 			return reconcile.Result{}, err
 		}
 
@@ -692,10 +699,28 @@ func (r *ReconcileCrcCluster) updateCrcClusterStatus(crc *crcv1alpha1.CrcCluster
 }
 
 func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster) (*rest.Config, error) {
-	kubeconfigBytes, err := base64.StdEncoding.DecodeString(crc.Status.Kubeconfig)
-	if err != nil {
-		return nil, err
-	}
+	// TODO: obviously don't hardcode this but instead read from some
+	// CRC bundle...
+	kubeconfigBytes := []byte(fmt.Sprintf(`apiVersion: v1
+clusters:
+- cluster:
+    insecure-skip-tls-verify: true
+    server: %s
+  name: crc
+contexts:
+- context:
+    cluster: crc
+    user: admin
+  name: admin
+current-context: admin
+kind: Config
+preferences: {}
+users:
+- name: admin
+  user:
+    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURaekNDQWsrZ0F3SUJBZ0lJTW9yOCtncGEwWGd3RFFZSktvWklodmNOQVFFTEJRQXdOakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TQXdIZ1lEVlFRREV4ZGhaRzFwYmkxcmRXSmxZMjl1Wm1sbkxYTnBaMjVsY2pBZQpGdzB5TURBMk1EVXhNVEU0TlRWYUZ3MHpNREEyTURNeE1URTROVFZhTURBeEZ6QVZCZ05WQkFvVERuTjVjM1JsCmJUcHRZWE4wWlhKek1SVXdFd1lEVlFRREV3eHplWE4wWlcwNllXUnRhVzR3Z2dFaU1BMEdDU3FHU0liM0RRRUIKQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURzUHE3VDZWNS9JeWwzSlR6ais2REg4aFZqR0tGUWZGS3dya3l0NTNLNwprbHVKbXF1WXpIUDUwSHg5RDc2V2FVM0V5cmZJNWl1MElFOFhiQXcvUittT2M3QWErOHJqTWliVFc0UHFsSVZ3CkFNQTlLOExybG5HVnJvdmlaQ0Z3QmMwM0dZSUVKUENJZno4K25aQzhzSkswbEZteVY1SkY3NDdMY0RyTENTdVkKQnJEemdibWJOcTVjWndQVCsvUHMrZ283T3Q3dXlod25obndmeisyUmxBWFpsMk0zN25SY0ZJOGdBanM1Zjg1UgpNRTJNZk5jVHZLLzFXWThZREZSQ2ZNREtiUXNPR0NWUzFyRFd6MGIxaVJRS3JIVFdSWkNXczBXQWs0SmROODhuClRFdFZCcWtaZEp2dGxRY2dCR3pkMWg2WTVFWVZmOUM3ajlwdHdDc2YwaGozQWdNQkFBR2pmekI5TUE0R0ExVWQKRHdFQi93UUVBd0lGb0RBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEQVlEVlIwVApBUUgvQkFJd0FEQWRCZ05WSFE0RUZnUVVZRFJXeVRpWUJqUlo2bHppQkxuUEFPM05ZZE13SHdZRFZSMGpCQmd3CkZvQVVHcUJLNmR2Wno1MUhlcjgvUEhPOC95cElydlV3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUR6WUdjc3MKaUpOYm1wbHdSUk15cHF2UWMvdCtTcXk4cUhrU2xWSnpwMFN5d3RLVnFKTGh4VXRhZlBpVmlkQlFJZjdFVkZRMApQRG1FdXJidkJWSDNPWUtRZTlmdks1cVdjYmdsenFRS1hwcUxLaElvQ3V5VHZ2azNmT0xDMmdyYjNJTGx1WDlwCnBMVE9YbjV0akR6NlNsSTJYNnB6SjdpZGIvdHJtaVdDYWlNdmNkQ0Qrc0VMUGZzS0h5QWZZZ3RONk9zQ2hxTFYKcHYwRnQwRVZ4dnlFMzc5TkdnWnhyM3doWktGYjJRUFBWRWRVcGZPOFRpRnpWRWFueCtIdWxCZjVkWm1ZMUtmago3TU0xYmtoWUhqcFFyWEhWK2YyVHZLS0FRZHh4SlErODlCajlFK0YrSXl6djlyMFdQZ3JITXJUbTlzYjJpVGllCm9hcnVaZU9GYVJVUS8vTT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBN0Q2dTArbGVmeU1wZHlVODQvdWd4L0lWWXhpaFVIeFNzSzVNcmVkeXU1SmJpWnFyCm1NeHorZEI4ZlErK2xtbE54TXEzeU9ZcnRDQlBGMndNUDBmcGpuT3dHdnZLNHpJbTAxdUQ2cFNGY0FEQVBTdkMKNjVaeGxhNkw0bVFoY0FYTk54bUNCQ1R3aUg4L1BwMlF2TENTdEpSWnNsZVNSZStPeTNBNnl3a3JtQWF3ODRHNQptemF1WEdjRDAvdno3UG9LT3pyZTdzb2NKNFo4SDgvdGtaUUYyWmRqTis1MFhCU1BJQUk3T1gvT1VUQk5qSHpYCkU3eXY5Vm1QR0F4VVFuekF5bTBMRGhnbFV0YXcxczlHOVlrVUNxeDAxa1dRbHJORmdKT0NYVGZQSjB4TFZRYXAKR1hTYjdaVUhJQVJzM2RZZW1PUkdGWC9RdTQvYWJjQXJIOUlZOXdJREFRQUJBb0lCQUNlSWljc09kM0RCR3BSRQpsLzd5d2NJVDRiNVdoZEFwTGRGQktiWEVVRy9SR3g1WTByUmNLbUE0b2t4dlVRNXNpc1lPd2xpTkkrMGRwdjZkClp5TkR6bkszSzFZb29wZ0ljWFRYRUtrMXQycTV4WEczSEFRK2hiMXRteDBFY3BBRGVJYnE3dFh3dEl1eTk0dHIKNUtlZXlMNE5RVUZWNURWdDFEQjVGRzJibUQ3MU5XRW5KNFhncTUxNUxkY2VUS1dBbm92NURmbmVNcXJqU21oUgpHeHV4RnorbVZyeUowUVIyL3JZY1l5cWRsZFJKQ2REcFdGRndSdDRVbmlLaHVHdEhGZlpTU2ZYU2QvYmhRbnUwCmtmbWh5OFlMMFpURUkvSE9pVWdBUzhFUHVWbWhsbmRESkwxY2ZoRUJNaFQvYXd1TDYvQklZS3gyWWJNTmpjZUUKbjdwVzlRa0NnWUVBK045enRRU296Z3JBYWwyV1Z1ei9rWENsMzlmd0VjZFpaUXV2b2MxaU5ZU1NtUzVLanFtbQpjSmRGNFd6bG0yUUJnUllFT044RE1vL3RQNmF3MmFiYjQ4SW1FYlRjKzFodzJBUThHSGpYNXlqTFkvM0VrT1FxCi9QNWE3QXFhbU9udS83TnplU1FYZERwQzhiWnZsNm5wdkVzallEZi95dWVnVmR6VmRMSktDK01DZ1lFQTh3S20KNWE1NTNDa2I5YUxXbVFOUGFqd25ZVXRHaG5EQUhvaThEV0E4ZTVxYzg1MHRSNTBBVDVNazhYVUF0YjRJbFkvUgpVS3FYY3U0blU5Tk9rYmVndmJoZWZ6ZDNyR0xPQkdlQUhqWmptUTV0T1hMT1Z4SVFJdElvRVBVTGtSclJrRDB2CjF5eVdZYXdhQXlka213Nk5haEowbldQRUxnbU1TcXlqZlBWMnN0MENnWUVBamJ0Yi91d3ZZbUFYSXJ3M29UdUoKZEgrdHg2UUhrV2h4VGExeEVYbVJBNStEaVg4bWNNYkhCZm53anlmZ1B6V2Q4YkRqS0t4QSt1dWlsb3hNelRkTQpwUkh0Y2tvSlM0OGJmTG8wcTA4dXpmT2FtVkJ0UUlMZ3hJSHFyK0IrR0xXcEtiQStBL0I4OXZFekxNclVGSkJzCmo1SlBERDM0QzhzTHNicDVTZU03YmpjQ2dZRUEzSmVFcnl4QnZHT28yTUszc1BCN1Q0RkpjaDFsNkxaQy83UzUKbUI3SzZKMENhblk4V3l5ZTBwMU14TTZrRlZacTduRTkzYzd0YWN2YjhWRDRtbmdwTnU4OUFKaDJUd3JsM3NPaApYa3VhLzU1RDhnbFFXMk92T0J5emVDa3BGZEJWZVd6Qmw3OEd4NlQxZS9WdmN2Mnp5eHp6dE1lU2x3UGQwUStECjNQUHBpeFVDZ1lBRVE5VFI4Z0s0V0NuTUxWSUxzWGZUUlVEdjRram9Ob3prT0JwVG5nejN4T0dRNW9vajNMVm0KTEtJU1VTeU15SkJNRCtNU2dnMVd1SkEzYUdGTWdMcndnRS9HaXQvTEtjaW8rMjFUVjdUQUtsZWJJMGd5SFdGbgpRSEtmOWVrTTl3Ym5xa0VPUmJ1cUJ0UUxsTWJjeXI0cHF0V3FjU3lkd1M5czllL2hTaGVCMWc9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
+`, crc.Status.APIURL))
 	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {
 		return nil, err
@@ -738,7 +763,7 @@ sudo chmod 0600 /var/lib/kubelet/config.json
 	return nil
 }
 
-func (r *ReconcileCrcCluster) updateClusterCredentials(crc *crcv1alpha1.CrcCluster, k8sClient *kubernetes.Clientset) error {
+func (r *ReconcileCrcCluster) updateClusterAdminUser(crc *crcv1alpha1.CrcCluster, k8sClient *kubernetes.Clientset) error {
 	secretName := "htpass-secret"
 	openshiftConfigNs := "openshift-config"
 	secret, err := k8sClient.CoreV1().Secrets(openshiftConfigNs).Get(secretName, metav1.GetOptions{})
@@ -898,29 +923,119 @@ func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Cl
 	return notReadyPods, nil
 }
 
+func (r *ReconcileCrcCluster) updateClusterAdminCert(crc *crcv1alpha1.CrcCluster, k8sClient *kubernetes.Clientset) (*crcv1alpha1.CrcCluster, error) {
+	if crc.Status.Kubeconfig != "" {
+		return crc, nil
+	}
+
+	csr := &certificatesv1beta1.CertificateSigningRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "crc-cluster-admin",
+		},
+		Spec: certificatesv1beta1.CertificateSigningRequestSpec{
+			Groups: []string{"cluster-admin"},
+			Usages: []certificatesv1beta1.KeyUsage{certificatesv1beta1.UsageClientAuth},
+		},
+	}
+	existingCsr, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().Get(csr.Name, metav1.GetOptions{})
+	if err != nil && errors.IsNotFound(err) {
+		cmd := exec.Command("openssl", "req", "-subj", "/CN=admin", "-new", "-key", "-", "-nodes")
+		clientKey, err := base64.StdEncoding.DecodeString(crc.Status.KubeAdminClientKey)
+		if err != nil {
+			return crc, err
+		}
+		cmd.Stdin = bytes.NewReader(clientKey)
+		csrBytes, err := cmd.Output()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return crc, fmt.Errorf("Error from openssl: %s", ee.Stderr)
+			}
+			return crc, err
+		}
+		csr.Spec.Request = csrBytes
+		existingCsr, err = k8sClient.CertificatesV1beta1().CertificateSigningRequests().Create(csr)
+		if err != nil {
+			return crc, err
+		}
+	} else if err != nil {
+		return crc, err
+	}
+
+	if err := r.approveCSR(existingCsr, k8sClient); err != nil {
+		return crc, err
+	}
+
+	approvedCsr, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().Get(csr.Name, metav1.GetOptions{})
+	if err != nil {
+		return crc, err
+	}
+	certBytes := approvedCsr.Status.Certificate
+	if len(certBytes) == 0 {
+		return crc, fmt.Errorf("Expected the approved CSR to have a status.certificate value")
+	}
+	clientCert := base64.StdEncoding.EncodeToString(certBytes)
+
+	// TODO: Disable insecure-skip-tls-verify and get the proper
+	// certificate-authority-data from the cluster
+	crc.Status.Kubeconfig = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`apiVersion: v1
+clusters:
+- cluster:
+    insecure-skip-tls-verify: true
+    server: %s
+  name: crc
+contexts:
+- context:
+    cluster: crc
+    user: admin
+  name: admin
+current-context: admin
+kind: Config
+preferences: {}
+users:
+- name: admin
+  user:
+    client-certificate-data: %s
+    client-key-data: %s
+`, crc.Status.APIURL, clientCert, crc.Status.KubeAdminClientKey)))
+
+	crc, err = r.updateCrcClusterStatus(crc)
+	if err != nil {
+		return crc, err
+	}
+
+	return crc, nil
+}
+
 func (r *ReconcileCrcCluster) approveCSRs(k8sClient *kubernetes.Clientset) error {
 	csrs, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 	for _, csr := range csrs.Items {
-		var alreadyApproved bool
-		for _, condition := range csr.Status.Conditions {
-			if condition.Type == certificatesv1beta1.CertificateApproved {
-				alreadyApproved = true
-			}
+		if err := r.approveCSR(&csr, k8sClient); err != nil {
+			return err
 		}
-		if !alreadyApproved {
-			csr.Status.Conditions = append(csr.Status.Conditions, certificatesv1beta1.CertificateSigningRequestCondition{
-				Type:           certificatesv1beta1.CertificateApproved,
-				Reason:         "CRCApprove",
-				Message:        "This CSR was approved by CodeReady Containers operator.",
-				LastUpdateTime: metav1.Now(),
-			})
-			_, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().UpdateApproval(&csr)
-			if err != nil {
-				return err
-			}
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) approveCSR(csr *certificatesv1beta1.CertificateSigningRequest, k8sClient *kubernetes.Clientset) error {
+	var alreadyApproved bool
+	for _, condition := range csr.Status.Conditions {
+		if condition.Type == certificatesv1beta1.CertificateApproved {
+			alreadyApproved = true
+		}
+	}
+	if !alreadyApproved {
+		csr.Status.Conditions = append(csr.Status.Conditions, certificatesv1beta1.CertificateSigningRequestCondition{
+			Type:           certificatesv1beta1.CertificateApproved,
+			Reason:         "CRCApprove",
+			Message:        "This CSR was approved by CodeReady Containers operator.",
+			LastUpdateTime: metav1.Now(),
+		})
+		_, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().UpdateApproval(csr)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1317,34 +1432,12 @@ func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) err
 		crc.Status.KubeAdminPassword = kubeAdminPassword
 	}
 
-	// TODO: Generate a new CSR and key for this user:
-	//openssl req -subj "/CN=cluster-admin" -new -newkey rsa:2048 -nodes -out admin.csr -keyout admin.key
-	// Submit the CSR for approval to the cluster
-	// Update the kubeconfig client-certificate and client-key using the key
-	// from openssl command and cert from CSR approval
-	if crc.Status.Kubeconfig == "" {
-		// TODO: Disable insecure-skip-tls-verify and get the proper
-		// certificate-authority-data from the cluster
-		crc.Status.Kubeconfig = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`apiVersion: v1
-clusters:
-- cluster:
-    insecure-skip-tls-verify: true
-    server: %s
-  name: crc
-contexts:
-- context:
-    cluster: crc
-    user: admin
-  name: admin
-current-context: admin
-kind: Config
-preferences: {}
-users:
-- name: admin
-  user:
-    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURaekNDQWsrZ0F3SUJBZ0lJTW9yOCtncGEwWGd3RFFZSktvWklodmNOQVFFTEJRQXdOakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TQXdIZ1lEVlFRREV4ZGhaRzFwYmkxcmRXSmxZMjl1Wm1sbkxYTnBaMjVsY2pBZQpGdzB5TURBMk1EVXhNVEU0TlRWYUZ3MHpNREEyTURNeE1URTROVFZhTURBeEZ6QVZCZ05WQkFvVERuTjVjM1JsCmJUcHRZWE4wWlhKek1SVXdFd1lEVlFRREV3eHplWE4wWlcwNllXUnRhVzR3Z2dFaU1BMEdDU3FHU0liM0RRRUIKQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURzUHE3VDZWNS9JeWwzSlR6ais2REg4aFZqR0tGUWZGS3dya3l0NTNLNwprbHVKbXF1WXpIUDUwSHg5RDc2V2FVM0V5cmZJNWl1MElFOFhiQXcvUittT2M3QWErOHJqTWliVFc0UHFsSVZ3CkFNQTlLOExybG5HVnJvdmlaQ0Z3QmMwM0dZSUVKUENJZno4K25aQzhzSkswbEZteVY1SkY3NDdMY0RyTENTdVkKQnJEemdibWJOcTVjWndQVCsvUHMrZ283T3Q3dXlod25obndmeisyUmxBWFpsMk0zN25SY0ZJOGdBanM1Zjg1UgpNRTJNZk5jVHZLLzFXWThZREZSQ2ZNREtiUXNPR0NWUzFyRFd6MGIxaVJRS3JIVFdSWkNXczBXQWs0SmROODhuClRFdFZCcWtaZEp2dGxRY2dCR3pkMWg2WTVFWVZmOUM3ajlwdHdDc2YwaGozQWdNQkFBR2pmekI5TUE0R0ExVWQKRHdFQi93UUVBd0lGb0RBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEQVlEVlIwVApBUUgvQkFJd0FEQWRCZ05WSFE0RUZnUVVZRFJXeVRpWUJqUlo2bHppQkxuUEFPM05ZZE13SHdZRFZSMGpCQmd3CkZvQVVHcUJLNmR2Wno1MUhlcjgvUEhPOC95cElydlV3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUR6WUdjc3MKaUpOYm1wbHdSUk15cHF2UWMvdCtTcXk4cUhrU2xWSnpwMFN5d3RLVnFKTGh4VXRhZlBpVmlkQlFJZjdFVkZRMApQRG1FdXJidkJWSDNPWUtRZTlmdks1cVdjYmdsenFRS1hwcUxLaElvQ3V5VHZ2azNmT0xDMmdyYjNJTGx1WDlwCnBMVE9YbjV0akR6NlNsSTJYNnB6SjdpZGIvdHJtaVdDYWlNdmNkQ0Qrc0VMUGZzS0h5QWZZZ3RONk9zQ2hxTFYKcHYwRnQwRVZ4dnlFMzc5TkdnWnhyM3doWktGYjJRUFBWRWRVcGZPOFRpRnpWRWFueCtIdWxCZjVkWm1ZMUtmago3TU0xYmtoWUhqcFFyWEhWK2YyVHZLS0FRZHh4SlErODlCajlFK0YrSXl6djlyMFdQZ3JITXJUbTlzYjJpVGllCm9hcnVaZU9GYVJVUS8vTT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
-    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBN0Q2dTArbGVmeU1wZHlVODQvdWd4L0lWWXhpaFVIeFNzSzVNcmVkeXU1SmJpWnFyCm1NeHorZEI4ZlErK2xtbE54TXEzeU9ZcnRDQlBGMndNUDBmcGpuT3dHdnZLNHpJbTAxdUQ2cFNGY0FEQVBTdkMKNjVaeGxhNkw0bVFoY0FYTk54bUNCQ1R3aUg4L1BwMlF2TENTdEpSWnNsZVNSZStPeTNBNnl3a3JtQWF3ODRHNQptemF1WEdjRDAvdno3UG9LT3pyZTdzb2NKNFo4SDgvdGtaUUYyWmRqTis1MFhCU1BJQUk3T1gvT1VUQk5qSHpYCkU3eXY5Vm1QR0F4VVFuekF5bTBMRGhnbFV0YXcxczlHOVlrVUNxeDAxa1dRbHJORmdKT0NYVGZQSjB4TFZRYXAKR1hTYjdaVUhJQVJzM2RZZW1PUkdGWC9RdTQvYWJjQXJIOUlZOXdJREFRQUJBb0lCQUNlSWljc09kM0RCR3BSRQpsLzd5d2NJVDRiNVdoZEFwTGRGQktiWEVVRy9SR3g1WTByUmNLbUE0b2t4dlVRNXNpc1lPd2xpTkkrMGRwdjZkClp5TkR6bkszSzFZb29wZ0ljWFRYRUtrMXQycTV4WEczSEFRK2hiMXRteDBFY3BBRGVJYnE3dFh3dEl1eTk0dHIKNUtlZXlMNE5RVUZWNURWdDFEQjVGRzJibUQ3MU5XRW5KNFhncTUxNUxkY2VUS1dBbm92NURmbmVNcXJqU21oUgpHeHV4RnorbVZyeUowUVIyL3JZY1l5cWRsZFJKQ2REcFdGRndSdDRVbmlLaHVHdEhGZlpTU2ZYU2QvYmhRbnUwCmtmbWh5OFlMMFpURUkvSE9pVWdBUzhFUHVWbWhsbmRESkwxY2ZoRUJNaFQvYXd1TDYvQklZS3gyWWJNTmpjZUUKbjdwVzlRa0NnWUVBK045enRRU296Z3JBYWwyV1Z1ei9rWENsMzlmd0VjZFpaUXV2b2MxaU5ZU1NtUzVLanFtbQpjSmRGNFd6bG0yUUJnUllFT044RE1vL3RQNmF3MmFiYjQ4SW1FYlRjKzFodzJBUThHSGpYNXlqTFkvM0VrT1FxCi9QNWE3QXFhbU9udS83TnplU1FYZERwQzhiWnZsNm5wdkVzallEZi95dWVnVmR6VmRMSktDK01DZ1lFQTh3S20KNWE1NTNDa2I5YUxXbVFOUGFqd25ZVXRHaG5EQUhvaThEV0E4ZTVxYzg1MHRSNTBBVDVNazhYVUF0YjRJbFkvUgpVS3FYY3U0blU5Tk9rYmVndmJoZWZ6ZDNyR0xPQkdlQUhqWmptUTV0T1hMT1Z4SVFJdElvRVBVTGtSclJrRDB2CjF5eVdZYXdhQXlka213Nk5haEowbldQRUxnbU1TcXlqZlBWMnN0MENnWUVBamJ0Yi91d3ZZbUFYSXJ3M29UdUoKZEgrdHg2UUhrV2h4VGExeEVYbVJBNStEaVg4bWNNYkhCZm53anlmZ1B6V2Q4YkRqS0t4QSt1dWlsb3hNelRkTQpwUkh0Y2tvSlM0OGJmTG8wcTA4dXpmT2FtVkJ0UUlMZ3hJSHFyK0IrR0xXcEtiQStBL0I4OXZFekxNclVGSkJzCmo1SlBERDM0QzhzTHNicDVTZU03YmpjQ2dZRUEzSmVFcnl4QnZHT28yTUszc1BCN1Q0RkpjaDFsNkxaQy83UzUKbUI3SzZKMENhblk4V3l5ZTBwMU14TTZrRlZacTduRTkzYzd0YWN2YjhWRDRtbmdwTnU4OUFKaDJUd3JsM3NPaApYa3VhLzU1RDhnbFFXMk92T0J5emVDa3BGZEJWZVd6Qmw3OEd4NlQxZS9WdmN2Mnp5eHp6dE1lU2x3UGQwUStECjNQUHBpeFVDZ1lBRVE5VFI4Z0s0V0NuTUxWSUxzWGZUUlVEdjRram9Ob3prT0JwVG5nejN4T0dRNW9vajNMVm0KTEtJU1VTeU15SkJNRCtNU2dnMVd1SkEzYUdGTWdMcndnRS9HaXQvTEtjaW8rMjFUVjdUQUtsZWJJMGd5SFdGbgpRSEtmOWVrTTl3Ym5xa0VPUmJ1cUJ0UUxsTWJjeXI0cHF0V3FjU3lkd1M5czllL2hTaGVCMWc9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
-`, crc.Status.APIURL)))
+	if crc.Status.KubeAdminClientKey == "" {
+		key, err := exec.Command("openssl", "genrsa", "4096").Output()
+		if err != nil {
+			return err
+		}
+		crc.Status.KubeAdminClientKey = base64.StdEncoding.EncodeToString(key)
 	}
 
 	return nil

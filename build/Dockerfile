@@ -4,6 +4,9 @@ ENV OPERATOR=/usr/local/bin/crc-operator \
     USER_UID=1001 \
     USER_NAME=crc-operator
 
+RUN microdnf update -y && rm -rf /var/cache/yum
+RUN microdnf install openssl -y && microdnf clean all
+
 # install operator binary
 COPY build/_output/bin/crc-operator ${OPERATOR}
 

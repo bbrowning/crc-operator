@@ -64,7 +64,7 @@ while [ -z "${KUBECONFIG_CONTENTS}" ]; do
 done
 echo "${KUBECONFIG_CONTENTS}" | base64 -d > $KUBECONFIGFILE
 
-export OCCRC="oc --insecure-skip-tls-verify --kubeconfig $KUBECONFIGFILE"
+export OCCRC="oc --kubeconfig $KUBECONFIGFILE"
 
 
 dlog "> Final stabilization check"
@@ -92,5 +92,5 @@ Connect as an administrator on the CLI using:
 ${OCCRC}
 
 Access the console at: ${CRC_CONSOLE}
-Login as an administrator with username 'admin' and password '${KUBEADMIN_PASSWORD}'
+Login as an administrator with username admin and password ${KUBEADMIN_PASSWORD}
 "
