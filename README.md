@@ -143,11 +143,12 @@ oc --kubeconfig kubeconfig-crc get pod --all-namespaces
   for how to add an additional API server certificate with the proper
   name. The operator would need to generate a new cert for the exposed
   API server URL and follow those instructions.
-- The image locations are all hardcoded. This is very temporary, with
-  the first iteration allowing an environment variable in the operator
-  and a later iteration adding a new API to manage multiple CRC VM
-  images where the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc)
-  they want to spin up.
+- Credentials are stored directly in the CRD status for now. A future
+  release will move these into Secrets.
+- Only one CRC bundle image is supported at the moment. A future
+  release will add a new API to manage multiple CRC VM images where
+  the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc) they want to
+  spin up.
 
 # Development
 
