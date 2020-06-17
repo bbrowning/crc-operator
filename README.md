@@ -101,7 +101,7 @@ Once your new cluster is up and Ready, the CrcCluster resource's
 status block has all the information needed to access it.
 
 
-### Log in to the web console:
+### Log in to the CRC cluster's web console:
 
 Console URL:
 
@@ -117,7 +117,7 @@ oc get crc my-cluster -n crc -o jsonpath={.status.kubeAdminPassword} && echo ""
 
 Log in as the user kubeadmin with the password from above.
 
-### Access the cluster from the command line using oc:
+### Access the CRC cluster from the command line using oc:
 
 Extract the kubeconfig to a `kubeconfig-crc` file in the current
 directory and use that to access the cluster:
@@ -125,6 +125,16 @@ directory and use that to access the cluster:
 ```
 oc get crc my-cluster -n crc -o jsonpath={.status.kubeconfig} | base64 -d > kubeconfig-crc
 oc --kubeconfig kubeconfig-crc get pod --all-namespaces
+```
+
+### Destroy the CRC cluster
+
+To destroy the CRC cluster, just delete the `CrcCluster`
+resource. Everything else related to it will get deleted
+automatically.
+
+```
+oc delete crc my-cluster -n crc
 ```
 
 # Known Issues
