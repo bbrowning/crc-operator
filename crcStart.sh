@@ -92,5 +92,5 @@ Connect as an administrator on the CLI using:
 ${OCCRC}
 
 Access the console at: ${CRC_CONSOLE}
-Login as an administrator with username admin and password ${KUBEADMIN_PASSWORD}
+Login as an administrator with username kubeadmin and password ${KUBEADMIN_PASSWORD}
 "

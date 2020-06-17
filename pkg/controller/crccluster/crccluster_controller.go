@@ -319,6 +319,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 			return reconcile.Result{}, err
 		}
 
+		reqLogger.Info("Removing shared kubeadmin secret.")
+		if err := r.removeSharedKubeadminSecret(insecureK8sClient); err != nil {
+			reqLogger.Error(err, "Error removing shared kubeadmin secret.")
+			return reconcile.Result{}, err
+		}
+
 		reqLogger.Info("Approving CSRs.")
 		if err := r.approveCSRs(insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error approving CSRs.")
@@ -776,7 +782,7 @@ func (r *ReconcileCrcCluster) updateClusterAdminUser(crc *crcv1alpha1.CrcCluster
 	}
 	// TODO: Need to generate a new kubeconfig here and a cert and/or
 	// token to go along with it
-	htpasswdBytes := []byte("admin:")
+	htpasswdBytes := []byte("kubeadmin:")
 	htpasswdBytes = append(htpasswdBytes, passwordHash...)
 	htpasswdBytes = append(htpasswdBytes, []byte("\n")...)
 	existingHtpasswdBytes, found := secret.Data["htpasswd"]
@@ -803,7 +809,7 @@ func (r *ReconcileCrcCluster) updateClusterAdminUser(crc *crcv1alpha1.CrcCluster
 				{
 					APIGroup: "rbac.authorization.k8s.io",
 					Kind:     "User",
-					Name:     "admin",
+					Name:     "kubeadmin",
 				},
 			},
 		}
@@ -939,7 +945,7 @@ func (r *ReconcileCrcCluster) updateClusterAdminCert(crc *crcv1alpha1.CrcCluster
 	}
 	existingCsr, err := k8sClient.CertificatesV1beta1().CertificateSigningRequests().Get(csr.Name, metav1.GetOptions{})
 	if err != nil && errors.IsNotFound(err) {
-		cmd := exec.Command("openssl", "req", "-subj", "/CN=admin", "-new", "-key", "-", "-nodes")
+		cmd := exec.Command("openssl", "req", "-subj", "/CN=kubeadmin", "-new", "-key", "-", "-nodes")
 		clientKey, err := base64.StdEncoding.DecodeString(crc.Status.KubeAdminClientKey)
 		if err != nil {
 			return crc, err
@@ -986,13 +992,13 @@ clusters:
 contexts:
 - context:
     cluster: crc
-    user: admin
-  name: admin
-current-context: admin
+    user: kubeadmin
+  name: kubeadmin
+current-context: kubeadmin
 kind: Config
 preferences: {}
 users:
-- name: admin
+- name: kubeadmin
   user:
     client-certificate-data: %s
     client-key-data: %s
@@ -1004,6 +1010,14 @@ users:
 	}
 
 	return crc, nil
+}
+
+func (r *ReconcileCrcCluster) removeSharedKubeadminSecret(k8sClient *kubernetes.Clientset) error {
+	err := k8sClient.CoreV1().Secrets("kube-system").Delete("kubeadmin", &metav1.DeleteOptions{})
+	if err != nil && errors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (r *ReconcileCrcCluster) approveCSRs(k8sClient *kubernetes.Clientset) error {
