@@ -45,17 +45,14 @@ on Kubernetes.
 Create the CrcCluster CRD
 
 ```
-oc apply -f deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.1/release-v0.0.1_crd.yaml
 ```
 
 Deploy the operator
 
 ```
 oc create ns crc-operator
-oc apply -f deploy/service_account.yaml
-oc apply -f deploy/role.yaml
-oc apply -f deploy/role_binding.yaml
-of apply -f deploy/operator.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.1/release-v0.0.1.yaml
 ```
 
 Ensure the operator comes up with no errors in its logs
@@ -72,7 +69,7 @@ for your CRC cluster in place of `my-cluster` and any namespace in
 place of `crc` in the commands below.
 
 ```
-oc new-project crc
+oc create ns crc
 
 cat <<EOF | oc apply -f -
 apiVersion: crc.developer.openshift.io/v1alpha1
@@ -83,7 +80,7 @@ metadata:
 spec:
   cpu: 4
   memory: 16Gi
-  pullSecret: $(cat $PULL_SECRET_FILE | base64 -w 0)
+  pullSecret: $(cat pull-secret | base64 -w 0)
 EOF
 
 oc wait --for=condition=Ready crc/my-cluster -n crc --timeout=1800s
@@ -109,13 +106,13 @@ status block has all the information needed to access it.
 Console URL:
 
 ```
-oc get crc my-cluster -n crc -o jsonpath={.status.consoleURL}
+oc get crc my-cluster -n crc -o jsonpath={.status.consoleURL} && echo ""
 ```
 
 Kubeadmin Password:
 
 ```
-oc get crc my-cluster -n crc -o jsonpath={.status.kubeAdminPassword}
+oc get crc my-cluster -n crc -o jsonpath={.status.kubeAdminPassword} && echo ""
 ```
 
 Log in as the user kubeadmin with the password from above.
@@ -129,10 +126,6 @@ directory and use that to access the cluster:
 oc get crc my-cluster -n crc -o jsonpath={.status.kubeconfig} | base64 -d > kubeconfig-crc
 oc --kubeconfig kubeconfig-crc get pod --all-namespaces
 ```
-
-# Development
-
-For tips on developing crc-operator itself, see [DEVELOPMENT.md]().
 
 # Known Issues
 
@@ -155,3 +148,7 @@ For tips on developing crc-operator itself, see [DEVELOPMENT.md]().
   and a later iteration adding a new API to manage multiple CRC VM
   images where the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc)
   they want to spin up.
+
+# Development
+
+For tips on developing crc-operator itself, see [DEVELOPMENT.md]().
