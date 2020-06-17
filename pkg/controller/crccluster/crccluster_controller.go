@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"math/big"
 	"net/http"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -59,6 +60,9 @@ import (
 
 var log = logf.Log.WithName("controller_crccluster")
 
+var bundleImage = os.Getenv("BUNDLE_IMAGE")
+var routesHelperImage = os.Getenv("ROUTES_HELPER_IMAGE")
+
 const (
 	sshPort int = 2022
 )
@@ -66,6 +70,14 @@ const (
 // Add creates a new CrcCluster Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
+	if bundleImage == "" {
+		log.Error(fmt.Errorf("BUNDLE_IMAGE environment variable must be set"), "")
+		os.Exit(1)
+	}
+	if routesHelperImage == "" {
+		log.Error(fmt.Errorf("ROUTES_HELPER_IMAGE environment variable must be set"), "")
+		os.Exit(1)
+	}
 	return add(mgr, newReconciler(mgr))
 }
 
@@ -631,7 +643,7 @@ func (r *ReconcileCrcCluster) ensureRouteHelperDeployment(crc *crcv1alpha1.CrcCl
 					Containers: []corev1.Container{
 						{
 							Name:            "route-helper",
-							Image:           "quay.io/bbrowning/crc-operator-routes-helper:v0.0.1",
+							Image:           routesHelperImage,
 							ImagePullPolicy: corev1.PullAlways,
 							Env: []corev1.EnvVar{
 								{
@@ -1469,7 +1481,7 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 	podNetwork := kubevirtv1.PodNetwork{}
 
 	containerDisk := kubevirtv1.ContainerDiskSource{
-		Image: "quay.io/bbrowning/crc_bundle_4.4.5",
+		Image: bundleImage,
 	}
 
 	vmRunning := true
