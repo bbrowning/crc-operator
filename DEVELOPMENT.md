@@ -18,8 +18,8 @@ export RELEASE_REGISTRY=quay.io/your-user
 make release
 
 oc create ns crc-operator
-oc apply -f deploy/release-dev_crd.yaml
-oc apply -f deploy/release-dev.yaml
+oc apply -f deploy/releases/release-dev_crd.yaml
+oc apply -f deploy/releases/release-dev.yaml
 
 oc logs deployment/crc-operator -n crc-operator -f
 
@@ -46,16 +46,16 @@ oc wait --for=condition=Ready crc/my-cluster -n crc --timeout=1800s
 export RELEASE_VERSION=0.0.1
 make release
 git add version/version.go
-git add deploy/release-v${RELEASE_VERSION}_crd.yaml 
-git add deploy/release-v${RELEASE_VERSION}.yaml
+git add deploy/releases/release-v${RELEASE_VERSION}_crd.yaml 
+git add deploy/releases/release-v${RELEASE_VERSION}.yaml
 git commit -m "Release v${RELEASE_VERSION}"
 git tag v${RELEASE_VERSION}
 git push origin master --tags
 ```
 
 Now, go to GitHub and add an actual release from the pushed
-tag. Attach the appropriate deploy/release-v*.yaml and
-deploy/release-v*_crd.yaml to the release.
+tag. Attach the appropriate deploy/releases/release-v*.yaml and
+deploy/releases/release-v*_crd.yaml to the release.
 
 # Other Notes Below
 
