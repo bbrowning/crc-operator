@@ -40,6 +40,26 @@ on OpenShift or
 [KubeVirt](https://kubevirt.io/user-guide/#/installation/installation)
 on Kubernetes.
 
+### OpenShift cluster-bot
+
+If you're using OpenShift's cluster-bot, the following steps are known to work.
+
+First, send cluster-bot a message via Slack to start a 4.4.5 cluster on Azure.
+
+```
+launch 4.4.5 azure
+```
+
+Once your cluster comes up and you login to it via `oc`, mark the
+masters as schedulable:
+
+```
+oc patch schedulers.config.openshift.io cluster -p='{"spec": {"mastersSchedulable": true}}' --type=merge
+```
+
+Install OpenShift CNV as linked in the previous section. Then, follow
+along with the steps below.
+
 ### Deploy the operator
 
 Create the CrcCluster CRD
