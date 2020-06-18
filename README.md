@@ -179,6 +179,17 @@ oc delete crc my-cluster -n crc
   release will add a new API to manage multiple CRC VM images where
   the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc) they want to
   spin up.
+- The client certificate in the kubeconfig generated for the kubeadmin
+  user is only valid for one month or less. Perhaps we shouldn't
+  provide that and expect a user to just `oc login` with their
+  username and password.
+- Multiple CRC clusters running in a single parent cluster can result
+  in the redhat/certified/community operator pods in the
+  openshift-marketplace namespace crashlooping because they don't come
+  up quickly enough and their liveness probe fails. This appears to be
+  both too aggressive liveness probes for those pods combined with
+  quay.io IP-based rate limiting and all these clusters appearing as
+  one IP to quay.io.
 
 # Development
 
