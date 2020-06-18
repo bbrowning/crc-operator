@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -930,6 +931,10 @@ func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Cl
 		return notReadyPods, err
 	}
 	for _, pod := range pods.Items {
+		ignoredMarketplacePodsRegex := regexp.MustCompile(`^community-operators-.*|certified-operators-.*$`)
+		if pod.Namespace == "openshift-marketplace" && ignoredMarketplacePodsRegex.MatchString(pod.Name) {
+			continue
+		}
 		for _, condition := range pod.Status.Conditions {
 			if condition.Type == corev1.PodReady {
 				if condition.Status != corev1.ConditionTrue {
