@@ -42,6 +42,11 @@ oc wait --for=condition=Ready crc/my-cluster -n crc --timeout=1800s
 
 # Releasing a new crc-operator
 
+First, ensure everything is committed, vendor/ directory is
+up-to-date, and so on. Add an entry to CHANGELOG.md with any important
+changes. Then, follow the steps below, substituting the proper release
+version in the first step:
+
 ```
 export RELEASE_VERSION=0.0.1
 make release
