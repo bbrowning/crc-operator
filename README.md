@@ -98,7 +98,7 @@ metadata:
   name: my-cluster
   namespace: crc
 spec:
-  cpu: 4
+  cpu: 6
   memory: 16Gi
   pullSecret: $(cat pull-secret | base64 -w 0)
 EOF
