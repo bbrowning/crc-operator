@@ -191,13 +191,15 @@ oc delete crc my-cluster -n crc
 
 # Known Issues
 
+The clusters created by this operator should be quite usable for
+development or testing needs. However, there are some known issues
+documented below. Most should not impact development or testing use
+cases significantly.
+
 - The first time a CrcCluster gets created on any specific Node, it
-  takes a LONG time to pull the CRC VM image from quay.io. There's a
-  planned CrcBundle API that may be able to mitigate this by
-  pre-pulling the VM images into the internal registry. For now, if
-  crcStart.sh times out and this is the first time running a VM on
-  that specific Node, just run the script again with the exact same
-  arguments.
+  may take a long time to pull the CRC VM image from quay.io. There's
+  a planned CrcBundle API that may be able to mitigate this by
+  pre-pulling the VM images into the internal registry.
 - The kubeconfigs have an incorrect certificate-authority-data that
   needs to get updated to match the actual cert from the running
   cluster. Should that have changed? Look at
@@ -207,10 +209,9 @@ oc delete crc my-cluster -n crc
   API server URL and follow those instructions.
 - Credentials are stored directly in the CRD status for now. A future
   release will move these into Secrets.
-- Only one CRC bundle image is supported at the moment. A future
-  release will add a new API to manage multiple CRC VM images where
-  the user can choose which (ie 4.4.5, 4.4.6, 4.5.0, etc) they want to
-  spin up.
+- CRC bundle images are hardcoded at the moment. A future release will
+  add a new API to change the available bundle images without code
+  changes.
 - The client certificate in the kubeconfig generated for the kubeadmin
   user is only valid for one month or less. Perhaps we shouldn't
   provide that and expect a user to just `oc login` with their
@@ -222,6 +223,13 @@ oc delete crc my-cluster -n crc
   both too aggressive liveness probes for those pods combined with
   quay.io IP-based rate limiting and all these clusters appearing as
   one IP to quay.io.
+- The disk size is fixed at 30GB for now. A future release will add
+  that as an option when creating the cluster.
+- The disk attached to the VM is ephemeral for now. A future release
+  will add a persistent disk option.
+- The alertmanager, grafana, prometheus-k8s, thanos-querier, and a few
+  other out-of-the-box routes incorrectly have a *.apps-crc.testing
+  host specified. This will be fixed shortly in a future release.
 
 # Development
 
