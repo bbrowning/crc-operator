@@ -28,6 +28,10 @@ type CrcClusterSpec struct {
 
 	// PullSecret is your base64-encoded OpenShift pull secret
 	PullSecret string `json:"pullSecret"`
+
+	// BundleImage is the CRC bundle image to use. If not set, a
+	// default will be chosen by the CRC Operator.
+	BundleImage string `json:"bundleImage,omitempty"`
 }
 
 const (

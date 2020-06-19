@@ -88,9 +88,16 @@ Clone this repo, copy your OpenShift pull secret into a file called
 for your CRC cluster in place of `my-cluster` and any namespace in
 place of `crc` in the commands below.
 
+Create a crc namespace:
+
 ```
 oc create ns crc
+```
 
+Create an OpenShift 4.4.5 cluster (the default if `bundleImage` is
+unspecified):
+
+```
 cat <<EOF | oc apply -f -
 apiVersion: crc.developer.openshift.io/v1alpha1
 kind: CrcCluster
@@ -101,10 +108,33 @@ spec:
   cpu: 6
   memory: 16Gi
   pullSecret: $(cat pull-secret | base64 -w 0)
+  bundleImage: quay.io/bbrowning/crc_bundle_4.4.5
 EOF
+```
 
+Or, to create an OpenShift 4.5.0-rc.1 cluster:
+
+```
+cat <<EOF | oc apply -f -
+apiVersion: crc.developer.openshift.io/v1alpha1
+kind: CrcCluster
+metadata:
+  name: my-cluster
+  namespace: crc
+spec:
+  cpu: 6
+  memory: 16Gi
+  pullSecret: $(cat pull-secret | base64 -w 0)
+  bundleImage: quay.io/bbrowning/crc_bundle_4.5.0-rc.1
+EOF
+```
+
+Wait for the new cluster to become ready:
+
+```
 oc wait --for=condition=Ready crc/my-cluster -n crc --timeout=1800s
 ```
+
 
 On reasonably sized Nodes, the CRC cluster usually comes up in 7-8
 minutes. The very first time a CRC cluster is created on a Node, it

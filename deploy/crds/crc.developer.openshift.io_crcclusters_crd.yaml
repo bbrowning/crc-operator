@@ -33,6 +33,10 @@ spec:
           spec:
             description: CrcClusterSpec defines the desired state of CrcCluster
             properties:
+              bundleImage:
+                description: BundleImage is the CRC bundle image to use. If not set,
+                  a default will be chosen by the CRC Operator.
+                type: string
               cpu:
                 default: 4
                 description: CPU is the number of CPUs to allocate to the cluster
