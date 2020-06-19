@@ -14,12 +14,12 @@ operator-sdk generate k8s
 operator-sdk generate crds
 
 export RELEASE_VERSION=dev
-export RELEASE_REGISTRY=quay.io/your-user
+export RELEASE_REGISTRY=quay.io/bbrowning
 make release
 
 oc create ns crc-operator
-oc apply -f deploy/releases/release-dev_crd.yaml
-oc apply -f deploy/releases/release-dev.yaml
+oc apply -f deploy/releases/release-vdev_crd.yaml
+oc apply -f deploy/releases/release-vdev.yaml
 
 oc logs deployment/crc-operator -n crc-operator -f
 
@@ -82,8 +82,18 @@ https://github.com/bbrowning/snc/commit/6d416a5dca837ef2bf42c6269a2010a239caf965
 
 ### Uploading a custom VM image as a container
 
-    cp /path/to/my/my-image bundle-containers/crc_4.4.5_serviceNetworkMtuCidr.qcow2
-    pushd bundle-containers
-    buildah bud -t quay.io/bbrowning/crc_bundle_4.4.5 -f Dockerfile_v4.4.5
-    buildah push quay.io/bbrowning/crc_bundle_4.4.5
-    popd bundle-containers
+Copy your crc_*.qcow2 image into `bundle-containers/`, copy one of the
+existing Dockerfiles under a new name, modify it for your needs, and
+build/push the container.
+
+```
+pushd bundle-containers
+podman build -t quay.io/bbrowning/crc_bundle_4.5.0-rc.1 -f Dockerfile_v4.5.0-rc.1
+podman push quay.io/bbrowning/crc_bundle_4.5.0-rc.1
+popd
+```
+
+### Using the new bundle image to start a CRC cluster
+
+Use the `spec.bundleImage` field in the `CrcCluster` object to point
+to a custom CRC image.

@@ -3,7 +3,7 @@ RELEASE_REGISTRY ?= "quay.io/bbrowning"
 release:
 	@echo "Checking for RELEASE_VERSION environment variable..."
 	[ ! -z "$(RELEASE_VERSION)" ]
-	@sed -i -e "s/Version = \".*\"/Version = \"$(RELEASE_VERSION)\"/" version/version.go
+	@if [ "$(RELEASE_VERSION)" != "dev" ]; then sed -i -e "s/Version = \".*\"/Version = \"$(RELEASE_VERSION)\"/" version/version.go; fi
 	@podman build route-helper -t $(RELEASE_REGISTRY)/crc-operator-routes-helper:v$(RELEASE_VERSION)
 	@podman push $(RELEASE_REGISTRY)/crc-operator-routes-helper:v$(RELEASE_VERSION)
 	@operator-sdk build $(RELEASE_REGISTRY)/crc-operator:v$(RELEASE_VERSION)

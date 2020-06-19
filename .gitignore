@@ -1,6 +1,8 @@
 bundle-containers/*.qcow2
 pull-secret
 kubeconfig-*
+deploy/releases/release-vdev.yaml
+deploy/releases/release-vdev_crd.yaml
 
 # Generated .gitignore below here
 
