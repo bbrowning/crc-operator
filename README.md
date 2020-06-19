@@ -96,7 +96,7 @@ Create a crc namespace:
 oc create ns crc
 ```
 
-Create an OpenShift 4.4.5 cluster (the default if `bundleImage` is
+Create an OpenShift 4.4.5 cluster (the default if `bundleName` is
 unspecified):
 
 ```
