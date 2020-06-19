@@ -30,8 +30,18 @@ type CrcClusterSpec struct {
 	PullSecret string `json:"pullSecret"`
 
 	// BundleImage is the CRC bundle image to use. If not set, a
-	// default will be chosen by the CRC Operator.
+	// default will be chosen based on the BundleName. This exists
+	// only to allow temporary overriding of new bundle images before
+	// a formal API gets created to allow dynamically creating new
+	// bundle images. The new bundle image will need to have the same
+	// SSH key and initial kubeconfig as the bundle specified in
+	// BundleName.
 	BundleImage string `json:"bundleImage,omitempty"`
+
+	// BundleName is the CRC bundle name to use. If not set, a default
+	// will be chosen by the CRC Operator.
+	// +kubebuilder:validation:Enum=ocp445;ocp450rc1;ocp450rc2
+	BundleName string `json:"bundleName,omitempty"`
 }
 
 const (

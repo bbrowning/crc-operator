@@ -83,10 +83,12 @@ oc logs deployment/crc-operator -n crc-operator
 
 ## Create a CRC cluster
 
-Clone this repo, copy your OpenShift pull secret into a file called
-`pull-secret`, and run the commands below. You can substitute any name
-for your CRC cluster in place of `my-cluster` and any namespace in
-place of `crc` in the commands below.
+Copy your OpenShift pull secret into a file called `pull-secret`, and
+run the commands below. You can substitute any name for your CRC
+cluster in place of `my-cluster` and any namespace in place of `crc`
+in the commands below.
+
+Valid CRC bundle names are `ocp445`, `ocp450rc1`, and `ocp450rc2`.
 
 Create a crc namespace:
 
@@ -108,11 +110,11 @@ spec:
   cpu: 6
   memory: 16Gi
   pullSecret: $(cat pull-secret | base64 -w 0)
-  bundleImage: quay.io/bbrowning/crc_bundle_4.4.5
+  bundleName: ocp445
 EOF
 ```
 
-Or, to create an OpenShift 4.5.0-rc.1 cluster:
+Or, to create an OpenShift 4.5.0-rc.2 cluster:
 
 ```
 cat <<EOF | oc apply -f -
@@ -125,7 +127,7 @@ spec:
   cpu: 6
   memory: 16Gi
   pullSecret: $(cat pull-secret | base64 -w 0)
-  bundleImage: quay.io/bbrowning/crc_bundle_4.5.0-rc.1
+  bundleName: ocp450rc2
 EOF
 ```
 

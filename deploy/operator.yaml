@@ -31,5 +31,5 @@ spec:
               value: crc-operator
             - name: ROUTES_HELPER_IMAGE
               value: REPLACE_ROUTES_HELPER_IMAGE
-            - name: DEFAULT_BUNDLE_IMAGE
-              value: quay.io/bbrowning/crc_bundle_4.4.5
+            - name: DEFAULT_BUNDLE_NAME
+              value: ocp445

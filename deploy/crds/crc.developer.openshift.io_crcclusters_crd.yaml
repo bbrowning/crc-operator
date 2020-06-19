@@ -35,7 +35,19 @@ spec:
             properties:
               bundleImage:
                 description: BundleImage is the CRC bundle image to use. If not set,
+                  a default will be chosen based on the BundleName. This exists only
+                  to allow temporary overriding of new bundle images before a formal
+                  API gets created to allow dynamically creating new bundle images.
+                  The new bundle image will need to have the same SSH key and initial
+                  kubeconfig as the bundle specified in BundleName.
+                type: string
+              bundleName:
+                description: BundleName is the CRC bundle name to use. If not set,
                   a default will be chosen by the CRC Operator.
+                enum:
+                - ocp445
+                - ocp450rc1
+                - ocp450rc2
                 type: string
               cpu:
                 default: 4

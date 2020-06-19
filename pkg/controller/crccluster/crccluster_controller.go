@@ -19,6 +19,7 @@ import (
 	"time"
 
 	crcv1alpha1 "github.com/bbrowning/crc-operator/pkg/apis/crc/v1alpha1"
+	"github.com/bbrowning/crc-operator/pkg/bundles"
 	libMachineLog "github.com/code-ready/machine/libmachine/log"
 	sshClient "github.com/code-ready/machine/libmachine/ssh"
 	"github.com/go-logr/logr"
@@ -61,20 +62,18 @@ import (
 
 var log = logf.Log.WithName("controller_crccluster")
 
-var defaultBundleImage = os.Getenv("DEFAULT_BUNDLE_IMAGE")
+var defaultBundleName = os.Getenv("DEFAULT_BUNDLE_NAME")
 var routesHelperImage = os.Getenv("ROUTES_HELPER_IMAGE")
 
 const (
-	sshPort           int    = 2022
-	bundleImage445    string = "quay.io/bbrowning/crc_bundle_4.4.5"
-	bundleImage450rc1 string = "quay.io/bbrowning/crc_bundle_4.5.0-rc.1"
+	sshPort int = 2022
 )
 
 // Add creates a new CrcCluster Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if defaultBundleImage == "" {
-		log.Error(fmt.Errorf("DEFAULT_BUNDLE_IMAGE environment variable must be set"), "")
+	if defaultBundleName == "" {
+		log.Error(fmt.Errorf("DEFAULT_BUNDLE_NAME environment variable must be set"), "")
 		os.Exit(1)
 	}
 	if routesHelperImage == "" {
@@ -228,7 +227,16 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		crc, err = r.initializeStatusConditions(reqLogger, crc)
 	}
 
-	virtualMachine, err := r.ensureVirtualMachineExists(reqLogger, crc)
+	bundle, err := bundleForCrc(crc)
+	if err != nil {
+		// TODO: This is a permanent error and thus should just fail
+		// some condition
+		reqLogger.Error(err, "Failed to get bundle for CrcCluster.")
+		return reconcile.Result{}, err
+	}
+	reqLogger.Info("Located bundle for cluster", "Bundle.Name", bundle.Name, "Bundle.Image", bundle.Image)
+
+	virtualMachine, err := r.ensureVirtualMachineExists(reqLogger, crc, bundle)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -273,21 +281,21 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
-	sshClient, err := createSSHClient(k8sService, crc)
+	sshClient, err := createSSHClient(k8sService, bundle)
 	if err != nil {
 		reqLogger.Error(err, "Failed to create SSH Client.")
 		return reconcile.Result{}, err
 	}
 
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeKubeletNotReady) {
-		crc, err = r.ensureKubeletStarted(reqLogger, sshClient, crc)
+		crc, err = r.ensureKubeletStarted(reqLogger, sshClient, crc, bundle)
 		if err != nil {
 			reqLogger.Error(err, "Failed to start Kubelet.")
 			return reconcile.Result{}, err
 		}
 	}
 
-	crcK8sConfig, err := restConfigFromCrcCluster(crc)
+	crcK8sConfig, err := restConfigFromCrcCluster(crc, bundle)
 	if err != nil {
 		reqLogger.Error(err, "Error generating Kubernetes REST config from kubeconfig.")
 		return reconcile.Result{}, err
@@ -719,55 +727,8 @@ func (r *ReconcileCrcCluster) updateCrcClusterStatus(crc *crcv1alpha1.CrcCluster
 	return crc, nil
 }
 
-func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster) (*rest.Config, error) {
-	// TODO: obviously don't hardcode this but instead read from some
-	// CRC bundle...
-	var kubeconfigBytes []byte
-	bundleImage := bundleImageForCrc(crc)
-	if bundleImage == bundleImage445 {
-		kubeconfigBytes = []byte(fmt.Sprintf(`apiVersion: v1
-clusters:
-- cluster:
-    insecure-skip-tls-verify: true
-    server: %s
-  name: crc
-contexts:
-- context:
-    cluster: crc
-    user: admin
-  name: admin
-current-context: admin
-kind: Config
-preferences: {}
-users:
-- name: admin
-  user:
-    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURaekNDQWsrZ0F3SUJBZ0lJTW9yOCtncGEwWGd3RFFZSktvWklodmNOQVFFTEJRQXdOakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TQXdIZ1lEVlFRREV4ZGhaRzFwYmkxcmRXSmxZMjl1Wm1sbkxYTnBaMjVsY2pBZQpGdzB5TURBMk1EVXhNVEU0TlRWYUZ3MHpNREEyTURNeE1URTROVFZhTURBeEZ6QVZCZ05WQkFvVERuTjVjM1JsCmJUcHRZWE4wWlhKek1SVXdFd1lEVlFRREV3eHplWE4wWlcwNllXUnRhVzR3Z2dFaU1BMEdDU3FHU0liM0RRRUIKQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURzUHE3VDZWNS9JeWwzSlR6ais2REg4aFZqR0tGUWZGS3dya3l0NTNLNwprbHVKbXF1WXpIUDUwSHg5RDc2V2FVM0V5cmZJNWl1MElFOFhiQXcvUittT2M3QWErOHJqTWliVFc0UHFsSVZ3CkFNQTlLOExybG5HVnJvdmlaQ0Z3QmMwM0dZSUVKUENJZno4K25aQzhzSkswbEZteVY1SkY3NDdMY0RyTENTdVkKQnJEemdibWJOcTVjWndQVCsvUHMrZ283T3Q3dXlod25obndmeisyUmxBWFpsMk0zN25SY0ZJOGdBanM1Zjg1UgpNRTJNZk5jVHZLLzFXWThZREZSQ2ZNREtiUXNPR0NWUzFyRFd6MGIxaVJRS3JIVFdSWkNXczBXQWs0SmROODhuClRFdFZCcWtaZEp2dGxRY2dCR3pkMWg2WTVFWVZmOUM3ajlwdHdDc2YwaGozQWdNQkFBR2pmekI5TUE0R0ExVWQKRHdFQi93UUVBd0lGb0RBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEQVlEVlIwVApBUUgvQkFJd0FEQWRCZ05WSFE0RUZnUVVZRFJXeVRpWUJqUlo2bHppQkxuUEFPM05ZZE13SHdZRFZSMGpCQmd3CkZvQVVHcUJLNmR2Wno1MUhlcjgvUEhPOC95cElydlV3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUR6WUdjc3MKaUpOYm1wbHdSUk15cHF2UWMvdCtTcXk4cUhrU2xWSnpwMFN5d3RLVnFKTGh4VXRhZlBpVmlkQlFJZjdFVkZRMApQRG1FdXJidkJWSDNPWUtRZTlmdks1cVdjYmdsenFRS1hwcUxLaElvQ3V5VHZ2azNmT0xDMmdyYjNJTGx1WDlwCnBMVE9YbjV0akR6NlNsSTJYNnB6SjdpZGIvdHJtaVdDYWlNdmNkQ0Qrc0VMUGZzS0h5QWZZZ3RONk9zQ2hxTFYKcHYwRnQwRVZ4dnlFMzc5TkdnWnhyM3doWktGYjJRUFBWRWRVcGZPOFRpRnpWRWFueCtIdWxCZjVkWm1ZMUtmago3TU0xYmtoWUhqcFFyWEhWK2YyVHZLS0FRZHh4SlErODlCajlFK0YrSXl6djlyMFdQZ3JITXJUbTlzYjJpVGllCm9hcnVaZU9GYVJVUS8vTT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
-    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFcEFJQkFBS0NBUUVBN0Q2dTArbGVmeU1wZHlVODQvdWd4L0lWWXhpaFVIeFNzSzVNcmVkeXU1SmJpWnFyCm1NeHorZEI4ZlErK2xtbE54TXEzeU9ZcnRDQlBGMndNUDBmcGpuT3dHdnZLNHpJbTAxdUQ2cFNGY0FEQVBTdkMKNjVaeGxhNkw0bVFoY0FYTk54bUNCQ1R3aUg4L1BwMlF2TENTdEpSWnNsZVNSZStPeTNBNnl3a3JtQWF3ODRHNQptemF1WEdjRDAvdno3UG9LT3pyZTdzb2NKNFo4SDgvdGtaUUYyWmRqTis1MFhCU1BJQUk3T1gvT1VUQk5qSHpYCkU3eXY5Vm1QR0F4VVFuekF5bTBMRGhnbFV0YXcxczlHOVlrVUNxeDAxa1dRbHJORmdKT0NYVGZQSjB4TFZRYXAKR1hTYjdaVUhJQVJzM2RZZW1PUkdGWC9RdTQvYWJjQXJIOUlZOXdJREFRQUJBb0lCQUNlSWljc09kM0RCR3BSRQpsLzd5d2NJVDRiNVdoZEFwTGRGQktiWEVVRy9SR3g1WTByUmNLbUE0b2t4dlVRNXNpc1lPd2xpTkkrMGRwdjZkClp5TkR6bkszSzFZb29wZ0ljWFRYRUtrMXQycTV4WEczSEFRK2hiMXRteDBFY3BBRGVJYnE3dFh3dEl1eTk0dHIKNUtlZXlMNE5RVUZWNURWdDFEQjVGRzJibUQ3MU5XRW5KNFhncTUxNUxkY2VUS1dBbm92NURmbmVNcXJqU21oUgpHeHV4RnorbVZyeUowUVIyL3JZY1l5cWRsZFJKQ2REcFdGRndSdDRVbmlLaHVHdEhGZlpTU2ZYU2QvYmhRbnUwCmtmbWh5OFlMMFpURUkvSE9pVWdBUzhFUHVWbWhsbmRESkwxY2ZoRUJNaFQvYXd1TDYvQklZS3gyWWJNTmpjZUUKbjdwVzlRa0NnWUVBK045enRRU296Z3JBYWwyV1Z1ei9rWENsMzlmd0VjZFpaUXV2b2MxaU5ZU1NtUzVLanFtbQpjSmRGNFd6bG0yUUJnUllFT044RE1vL3RQNmF3MmFiYjQ4SW1FYlRjKzFodzJBUThHSGpYNXlqTFkvM0VrT1FxCi9QNWE3QXFhbU9udS83TnplU1FYZERwQzhiWnZsNm5wdkVzallEZi95dWVnVmR6VmRMSktDK01DZ1lFQTh3S20KNWE1NTNDa2I5YUxXbVFOUGFqd25ZVXRHaG5EQUhvaThEV0E4ZTVxYzg1MHRSNTBBVDVNazhYVUF0YjRJbFkvUgpVS3FYY3U0blU5Tk9rYmVndmJoZWZ6ZDNyR0xPQkdlQUhqWmptUTV0T1hMT1Z4SVFJdElvRVBVTGtSclJrRDB2CjF5eVdZYXdhQXlka213Nk5haEowbldQRUxnbU1TcXlqZlBWMnN0MENnWUVBamJ0Yi91d3ZZbUFYSXJ3M29UdUoKZEgrdHg2UUhrV2h4VGExeEVYbVJBNStEaVg4bWNNYkhCZm53anlmZ1B6V2Q4YkRqS0t4QSt1dWlsb3hNelRkTQpwUkh0Y2tvSlM0OGJmTG8wcTA4dXpmT2FtVkJ0UUlMZ3hJSHFyK0IrR0xXcEtiQStBL0I4OXZFekxNclVGSkJzCmo1SlBERDM0QzhzTHNicDVTZU03YmpjQ2dZRUEzSmVFcnl4QnZHT28yTUszc1BCN1Q0RkpjaDFsNkxaQy83UzUKbUI3SzZKMENhblk4V3l5ZTBwMU14TTZrRlZacTduRTkzYzd0YWN2YjhWRDRtbmdwTnU4OUFKaDJUd3JsM3NPaApYa3VhLzU1RDhnbFFXMk92T0J5emVDa3BGZEJWZVd6Qmw3OEd4NlQxZS9WdmN2Mnp5eHp6dE1lU2x3UGQwUStECjNQUHBpeFVDZ1lBRVE5VFI4Z0s0V0NuTUxWSUxzWGZUUlVEdjRram9Ob3prT0JwVG5nejN4T0dRNW9vajNMVm0KTEtJU1VTeU15SkJNRCtNU2dnMVd1SkEzYUdGTWdMcndnRS9HaXQvTEtjaW8rMjFUVjdUQUtsZWJJMGd5SFdGbgpRSEtmOWVrTTl3Ym5xa0VPUmJ1cUJ0UUxsTWJjeXI0cHF0V3FjU3lkd1M5czllL2hTaGVCMWc9PQotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQo=
-`, crc.Status.APIURL))
-	} else if bundleImage == bundleImage450rc1 {
-		kubeconfigBytes = []byte(fmt.Sprintf(`apiVersion: v1
-clusters:
-- cluster:
-    insecure-skip-tls-verify: true
-    server: %s
-  name: crc
-contexts:
-- context:
-    cluster: crc
-    user: admin
-  name: admin
-current-context: admin
-kind: Config
-preferences: {}
-users:
-- name: admin
-  user:
-    client-certificate-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURaekNDQWsrZ0F3SUJBZ0lJVGlKamZ3L1lVVlF3RFFZSktvWklodmNOQVFFTEJRQXdOakVTTUJBR0ExVUUKQ3hNSmIzQmxibk5vYVdaME1TQXdIZ1lEVlFRREV4ZGhaRzFwYmkxcmRXSmxZMjl1Wm1sbkxYTnBaMjVsY2pBZQpGdzB5TURBMk1UZ3lNREV6TlRoYUZ3MHpNREEyTVRZeU1ERXpOVGhhTURBeEZ6QVZCZ05WQkFvVERuTjVjM1JsCmJUcHRZWE4wWlhKek1SVXdFd1lEVlFRREV3eHplWE4wWlcwNllXUnRhVzR3Z2dFaU1BMEdDU3FHU0liM0RRRUIKQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUUNjMXRBTFdBa3hjZmljOGtReUdzVHQxTzNjL1pLRndWRnZZZjJqaVZIOApzRlJ2L0xuR3FBTUxZTWVUQTR6L0dibG9xMnpudjJnK3JtYzRkcmxKQnYxWDBGSUNkT2J1dmc2czBkd3VHbEp2Ck13VC9ZT2xHN0JWcGpPcTRZaXVtWFJrWnVTR05ZeW9LSy9WMFdLelgyNGRSVVJNczdETHpPbFBSMWdsRGlOVGEKaTdUQVZMSGVReGJ4QXlHQVYvRXVUNVkyRU9wa2o2THRQejRsdUFHM2hNbWhIdzNPcVFwK2w1UFFFRlpNMElMZApESmZ5Mi80UEFVZFBYVkQyeHZCcFZOS0FGVnltUGNFcVIyVzA1dHovdWNGVks5TUdlUndkRUtleDBvb2lkeXQwCnc0V1MwcHdxNEwyamlqY3luSENucjVsR2V0RVRJNnh6MnpxTC8yMkx2YzZYQWdNQkFBR2pmekI5TUE0R0ExVWQKRHdFQi93UUVBd0lGb0RBZEJnTlZIU1VFRmpBVUJnZ3JCZ0VGQlFjREFRWUlLd1lCQlFVSEF3SXdEQVlEVlIwVApBUUgvQkFJd0FEQWRCZ05WSFE0RUZnUVV5YnkrdFdndlZKZjBER21Jck1sa0MwQkhIZVF3SHdZRFZSMGpCQmd3CkZvQVVCUkFuZTVOTkRKWXdFbWl4TjhzaFU0R21yell3RFFZSktvWklodmNOQVFFTEJRQURnZ0VCQUJYaWJzRnUKN1hRYjFQaTI4eW1Fb2FzU3NCRmlRQm81TGFNTytoZ2ZZL2ZlZ04rbW9hZUFwWGM0L2t4Y25hanNFOHN5aFc3ZwoyN3BucTlLU3pWNG1HNnpsZi85NmlxNis2RWFCUngxcFFwMC9EdG5SRlJtSDR0M2xndnZyVE5ES3Y5UnZLTUh4CmJUN1ZsK2VJU3FMc0tKMXc5N1FxS3haUzBnaHF5TlVaYjlVMHdYZHZRUm83TXZ2cnNlZDI1dG9kbnM5VVBkSEMKRTRKVi8rSzUvSzRpVTZSWjF6R0xPemtHWTVHelMzMHkzemJTS1o5bUhBSGl0Y3p6TytTektRbzkzSnZHcFFiaApuWkRQRHVoSFBZNk1iVzRodk02dDdZdG4xeDh5R3k0N096VjZUTW01YnlmTDlZcjFnbU5WWjgzK0l5cC9JV2pXCmdLSThjZThJcGh2TS9TYz0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
-    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFb3dJQkFBS0NBUUVBbk5iUUMxZ0pNWEg0blBKRU1ockU3ZFR0M1AyU2hjRlJiMkg5bzRsUi9MQlViL3k1CnhxZ0RDMkRIa3dPTS94bTVhS3RzNTc5b1BxNW5PSGE1U1FiOVY5QlNBblRtN3I0T3JOSGNMaHBTYnpNRS8yRHAKUnV3VmFZenF1R0lycGwwWkdia2hqV01xQ2l2MWRGaXMxOXVIVVZFVExPd3k4enBUMGRZSlE0alUyb3Uwd0ZTeAoza01XOFFNaGdGZnhMaytXTmhEcVpJK2k3VDgrSmJnQnQ0VEpvUjhOenFrS2ZwZVQwQkJXVE5DQzNReVg4dHYrCkR3RkhUMTFROXNid2FWVFNnQlZjcGozQktrZGx0T2JjLzduQlZTdlRCbmtjSFJDbnNkS0tJbmNyZE1PRmt0S2MKS3VDOW80bzNNcHh3cDYrWlJuclJFeU9zYzlzNmkvOXRpNzNPbHdJREFRQUJBb0lCQUZubFZvSHFCL3JyVkpEQQozQTNNQWl3LzY4YkxJUHpCZmFmV0JzZUJvaGl3Q1BYWGFiUlFBTTY0dml1cDBWczJwMnN6TnN6dWpSWEFhVEdYCiswTzhXZUhIYWZvMmYxZEFZTEQxNkxvVUpFUFFmb0RTVDJOelZpS1Z2c1BJb1RST0VHRUtHQTB1Vlo1VzYrMncKRmdIenRuQUpoSEF2UWxUZmpjT3Nac3JxMXZZY1Q5bGptZWwvOUJ4Z1hjVUo4WGpsZzNhalN6UVlWems1RTJQagpnMEZIUHpUcHdGR1Z0OUtEMkQyVGVpc3VtdHUyU3pHeTZtN1dMSURRdDRjTzBudTdMbXJEZVJSQm9hZkhpYjlBCmdXNVJHTjZJZG1ERjcyWjBGeUNVTElEY1hodDJoOXRuYk9EQlZMVGQwT1VabGN6QWd0SUh3MzJ0Z0Jmb3BSaXUKQks5KzBzRUNnWUVBeXRvK3BiUmpwdEVWM3hTejVBWnpSK1AzYmRRTzNxNjQzdjBpa3E2OHBuR1JaSVVDNnlsdQpNVWcwZ29wOGRQZWJxVHlVSlZPZ3N5cnBmY201T25yRkJCT0dOaDJ5ZFgzTXpBc1RPWlltSWdVbC8vOC8raHVQClNEekprYmNyc3lFb2xiaUNlUkVYU3oxNlVwVDNTN3FIcXVrNGp5cVQ3a2x4aGlJNHFZdEY3eThDZ1lFQXhlNVoKaFdpL3ppU0h6MUdPQ1F3ZDNUZWpjQWRxTXllMHc2ajhpWlNPQS9qSC9WWFNBR3NHek56aWorcncwRDdLd3hpSwpBWTVCOFZvSm5mYzUzSkhCd25HUDZqVmgyTjhsdXFFUGxDZWQvSmxzM0lpWkFXMW5pL2ZxYm9ERkZhVmhuUXp3CnBKWE9OUnBYN2ZreDdGR0RGNGw4QXVhQ25sN3BNWTR6dHhINC9Sa0NnWUF4TEl6SlFKeHpvUFhyV1NwdW1YMnkKckxtYlh5K25uYlZsSVBvVGt0WmFodWRXOWNPS1hFWEJIcDdVRWx3dlFxTHllS1AxRkh1OVV5YTgvbnl2aDNsaApEcGFYWWNXVUk4WFVwTTZwUkJQRVpYa2J3TFd5bktHMFFrQWUyY2QzS2crYms5blZIV2FITDhVS1plQTQ5R1BVCjg2cHBVa29BRnIrMVkzQlc4Vk1uc3dLQmdRQ04xYjQ2MXBSVDhXT00wZUZaWkdCbUxMK213UGwrVE43Qk12QTgKMnNKbDREblh0VTcyVTd1Y3hGQnFWeTVYM0JkS2RPUTROeXZUK3ZSWFNWa2lVU1NxNU52L05sKzJuRG1hSWw1YQppWVV5QlBPNG1QNGp3clZuM0xFV25Kb2VaOU9xU2lLTG5ub1ZIWnFUQW5hZTVNNXU2R3VBWEpTUFRtNEd2K01aCk5melp5UUtCZ0I2RXZZa2FrTkVaMHJqeWRGUXdGWGUwWnhSN0IwUnUxWnYvY2F6RVVteVFDdHBIWTlSRmx4TTAKdms2Ylg0UEZtTTlBZGlXVWliL1hGOHp5TitsNmtoVzB5TG1paWhlRm5pNFNFU3Y5clBBRG8vUENPMlRXRHZLOApVQWNCNllwUU5JSmdPbnlRalpvejh3L3FuT1ZPWWhRMUtCQ3ZER1lqZDAwczlEdm5TM0dOCi0tLS0tRU5EIFJTQSBQUklWQVRFIEtFWS0tLS0tCg==`, crc.Status.APIURL))
-	} else {
-		return nil, fmt.Errorf("unknown bundle image - valid images are hardcoded for now")
-	}
+func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*rest.Config, error) {
+	kubeconfigBytes := []byte(strings.ReplaceAll(bundle.Kubeconfig, "https://api.crc.testing:6443", crc.Status.APIURL))
 	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {
 		return nil, err
@@ -1190,7 +1151,7 @@ func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.C
 	return nil
 }
 
-func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
+func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*crcv1alpha1.CrcCluster, error) {
 	output, err := sshClient.Output(`sudo systemctl status kubelet; if [ $? == 0 ]; then echo "__kubelet_running: true"; else echo "__kubelet_running: false"; fi`)
 	if err != nil {
 		logger.Error(err, "Error checking kubelet status in VirtualMachine.")
@@ -1216,7 +1177,7 @@ func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient
 		fmt.Printf("Nameserver is '%s'\n", nameserver)
 
 		insecureReadyzHack := ""
-		if bundleImageForCrc(crc) == bundleImage450rc1 {
+		if bundle.Name == "ocp450rc1" {
 			insecureReadyzHack = `
 echo "SHOULD_LOOP=true
 cleanup() {
@@ -1371,8 +1332,8 @@ func (r *ReconcileCrcCluster) initializeStatusConditions(logger logr.Logger, crc
 	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) ensureVirtualMachineExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*kubevirtv1.VirtualMachine, error) {
-	virtualMachine, err := r.newVirtualMachineForCrcCluster(crc)
+func (r *ReconcileCrcCluster) ensureVirtualMachineExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*kubevirtv1.VirtualMachine, error) {
+	virtualMachine, err := r.newVirtualMachineForCrcCluster(crc, bundle)
 	if err != nil {
 		logger.Error(err, "Failed to create VirtualMachine.", "VirtualMachine.Namespace", virtualMachine.Namespace, "VirtualMachine.Name", virtualMachine.Name)
 		return nil, err
@@ -1548,32 +1509,52 @@ func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) err
 	return nil
 }
 
-func bundleImageForCrc(crc *crcv1alpha1.CrcCluster) string {
-	bundleImage := crc.Spec.BundleImage
-	if bundleImage == "" {
-		bundleImage = defaultBundleImage
+func bundleForCrc(crc *crcv1alpha1.CrcCluster) (*bundles.Bundle, error) {
+	bundleName := crc.Spec.BundleName
+	if bundleName == "" {
+		bundleName = defaultBundleName
 	}
-	return bundleImage
+	bundleImage := crc.Spec.BundleImage
+
+	// First, see if a BundleImage was given and exactly matches one
+	// of the predefined bundle images
+	if bundleImage != "" {
+		bundle, err := bundles.BundleFromImage(bundleImage)
+		if err == nil {
+			return bundle, nil
+		}
+	}
+	// Now, attempt to find the bundle by name
+	bundle, err := bundles.BundleFromName(bundleName)
+	if err != nil {
+		return nil, err
+	}
+	if bundleImage != "" {
+		bundle.Image = bundleImage
+	}
+	return bundle, nil
 }
 
-// TODO: Obviously none of the hardcoded image/cpu/memory values below
-// should be hardcoded
-func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.CrcCluster) (*kubevirtv1.VirtualMachine, error) {
+func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*kubevirtv1.VirtualMachine, error) {
 	labels := map[string]string{
 		"crcCluster":          crc.Name,
 		"kubevirt.io/domain":  crc.Name,
 		"vm.kubevirt.io/name": crc.Name,
 	}
 
-	podNetwork := kubevirtv1.PodNetwork{}
-
-	bundleImage := bundleImageForCrc(crc)
-	containerDisk := kubevirtv1.ContainerDiskSource{
-		Image: bundleImage,
+	vm := &kubevirtv1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crc.Name,
+			Namespace: crc.Namespace,
+			Labels:    labels,
+		},
 	}
 
+	containerDisk := kubevirtv1.ContainerDiskSource{
+		Image: bundle.Image,
+	}
+	podNetwork := kubevirtv1.PodNetwork{}
 	vmRunning := true
-
 	diskBootOrder := uint(1)
 	diskTarget := kubevirtv1.DiskTarget{
 		Bus: "virtio",
@@ -1634,16 +1615,9 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 		},
 	}
 
-	vm := &kubevirtv1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      crc.Name,
-			Namespace: crc.Namespace,
-			Labels:    labels,
-		},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Running:  &vmRunning,
-			Template: &vmTemplate,
-		},
+	vm.Spec = kubevirtv1.VirtualMachineSpec{
+		Running:  &vmRunning,
+		Template: &vmTemplate,
 	}
 
 	vmCPU := kubevirtv1.CPU{
@@ -1839,92 +1813,8 @@ func (r *ReconcileCrcCluster) newIngressForCrcCluster(crc *crcv1alpha1.CrcCluste
 	return ingress, nil
 }
 
-// TODO: Obviously none of this should be hardcoded...
-func createSSHClient(k8sService *corev1.Service, crc *crcv1alpha1.CrcCluster) (sshClient.Client, error) {
-	var privateKey ssh.Signer
-	var err error
-	bundleImage := bundleImageForCrc(crc)
-	if bundleImage == bundleImage445 {
-		privateKey, err = ssh.ParsePrivateKey([]byte(`-----BEGIN OPENSSH PRIVATE KEY-----
-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
-4GkUdjSO9DQoUAAAAEY29yZQECAwQFBgc=
------END OPENSSH PRIVATE KEY-----`))
-	} else if bundleImage == bundleImage450rc1 {
-		privateKey, err = ssh.ParsePrivateKey([]byte(`-----BEGIN OPENSSH PRIVATE KEY-----
-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
-VsNlcOaKAhHk3suQAAAARjb3JlAQIDBAU=
------END OPENSSH PRIVATE KEY-----`))
-	} else {
-		return nil, fmt.Errorf("unknown bundle image - valid images are hardcoded for now")
-	}
+func createSSHClient(k8sService *corev1.Service, bundle *bundles.Bundle) (sshClient.Client, error) {
+	privateKey, err := ssh.ParsePrivateKey([]byte(bundle.SSHKey))
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse private key: %v", err)
 	}
