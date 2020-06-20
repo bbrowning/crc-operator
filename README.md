@@ -65,14 +65,14 @@ along with the steps below.
 Create the CrcCluster CRD
 
 ```
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.2/release-v0.0.2_crd.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.3/release-v0.0.3_crd.yaml
 ```
 
 Deploy the operator
 
 ```
 oc create ns crc-operator
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.2/release-v0.0.2.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.3/release-v0.0.3.yaml
 ```
 
 Ensure the operator comes up with no errors in its logs
