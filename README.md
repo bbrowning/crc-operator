@@ -171,8 +171,14 @@ Log in as the user kubeadmin with the password from above.
 
 ### Access the CRC cluster from the command line using oc:
 
-Extract the kubeconfig to a `kubeconfig-crc` file in the current
-directory and use that to access the cluster:
+The easiest way is to login to the web console, click the dropdown for
+the `kubeadmin` user in the upper right corner, and click 'Copy Login
+Command'.
+
+Alternatively, you can extract the kubeconfig to a `kubeconfig-crc` file
+in the current directory and use that to access the cluster. The
+client certificate in this kubeconfig expires in some period less than
+30 days.
 
 ```
 oc get crc my-cluster -n crc -o jsonpath={.status.kubeconfig} | base64 -d > kubeconfig-crc
