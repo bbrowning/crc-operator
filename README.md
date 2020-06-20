@@ -227,9 +227,6 @@ cases significantly.
   that as an option when creating the cluster.
 - The disk attached to the VM is ephemeral for now. A future release
   will add a persistent disk option.
-- The alertmanager, grafana, prometheus-k8s, thanos-querier, and a few
-  other out-of-the-box routes incorrectly have a *.apps-crc.testing
-  host specified. This will be fixed shortly in a future release.
 - The API server URL shown in the console (ie by Copy Login Command)
   is wrong. This needs to get updated so users can easily login via
   the CLI.

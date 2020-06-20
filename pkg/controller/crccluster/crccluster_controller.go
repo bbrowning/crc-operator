@@ -248,13 +248,13 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 
 	apiHost := ""
 	if r.routeAPIExists {
-		route, err := r.ensureRouteExists(reqLogger, crc)
+		route, err := r.ensureAPIRouteExists(reqLogger, crc)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
 		apiHost = route.Spec.Host
 	} else {
-		ingress, err := r.ensureIngressExists(reqLogger, crc)
+		ingress, err := r.ensureAPIIngressExists(reqLogger, crc)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
@@ -262,7 +262,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	}
 	crc.Status.APIURL = fmt.Sprintf("https://%s", apiHost)
 	crc.Status.BaseDomain = strings.Replace(apiHost, "api.", "", 1)
-	crc.Status.ConsoleURL = fmt.Sprintf("https://%s", consoleHost(crc.Status.BaseDomain))
+	crc.Status.ConsoleURL = fmt.Sprintf("https://%s", routeHostForDomain(crc.Status.BaseDomain, "console", "openshift-console"))
 
 	r.updateVirtualMachineNotReadyCondition(virtualMachine, crc)
 	r.updateNetworkingNotReadyCondition(k8sService, crc)
@@ -400,12 +400,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
-	reqLogger.Info("Updating console route.")
-	consoleRouteUpdated, err := r.updateConsoleRoute(crc, insecureCrcK8sConfig)
+	reqLogger.Info("Updating default routes.")
+	routesUpdated, err := r.updateDefaultRoutes(crc, insecureCrcK8sConfig)
 	if err != nil {
-		reqLogger.Error(err, "Error updating console route.")
+		reqLogger.Error(err, "Error updating default routes.")
 		return reconcile.Result{}, err
-	} else if consoleRouteUpdated {
+	} else if routesUpdated {
 		return reconcile.Result{RequeueAfter: time.Second * 20}, nil
 	}
 
@@ -1079,26 +1079,34 @@ func (r *ReconcileCrcCluster) updateIngressDomain(crc *crcv1alpha1.CrcCluster, r
 	return nil
 }
 
-func (r *ReconcileCrcCluster) updateConsoleRoute(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) (bool, error) {
+func (r *ReconcileCrcCluster) updateDefaultRoutes(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) (bool, error) {
+	updatedRoutes := false
 	routeClient, err := routev1Client.NewForConfig(restConfig)
 	if err != nil {
-		return false, err
+		return updatedRoutes, err
 	}
-	consoleRouteNs := "openshift-console"
-	consoleRouteName := "console"
-	consoleRouteHost := consoleHost(crc.Status.BaseDomain)
-	route, err := routeClient.Routes(consoleRouteNs).Get(consoleRouteName, metav1.GetOptions{})
-	if err != nil {
-		return false, err
+	defaultRouteNamespaces := []string{
+		"openshift-console",
+		"openshift-image-registry",
+		"openshift-monitoring",
 	}
-	if route.Spec.Host != consoleRouteHost {
-		route.Spec.Host = consoleRouteHost
-		if _, err := routeClient.Routes(consoleRouteNs).Update(route); err != nil {
-			return false, err
+	for _, routeNs := range defaultRouteNamespaces {
+		routes, err := routeClient.Routes(routeNs).List(metav1.ListOptions{})
+		if err != nil {
+			return updatedRoutes, err
 		}
-		return true, nil
+		for _, route := range routes.Items {
+			expectedRouteHost := routeHostForDomain(crc.Status.BaseDomain, route.Name, route.Namespace)
+			if route.Spec.Host != expectedRouteHost {
+				route.Spec.Host = expectedRouteHost
+				if _, err := routeClient.Routes(route.Namespace).Update(&route); err != nil {
+					return updatedRoutes, err
+				}
+				updatedRoutes = true
+			}
+		}
 	}
-	return false, nil
+	return updatedRoutes, nil
 }
 
 func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) error {
@@ -1400,8 +1408,8 @@ func (r *ReconcileCrcCluster) ensureServiceExists(logger logr.Logger, crc *crcv1
 	return k8sSvc, nil
 }
 
-func (r *ReconcileCrcCluster) ensureRouteExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*routev1.Route, error) {
-	route, err := r.newRouteForCrcCluster(crc)
+func (r *ReconcileCrcCluster) ensureAPIRouteExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*routev1.Route, error) {
+	route, err := r.newAPIRouteForCrcCluster(crc)
 	if err != nil {
 		logger.Error(err, "Failed to create OpenShift Route.", "Route.Namespace", route.Namespace, "Route.Name", route.Name)
 		return nil, err
@@ -1434,8 +1442,8 @@ func (r *ReconcileCrcCluster) ensureRouteExists(logger logr.Logger, crc *crcv1al
 	return route, nil
 }
 
-func (r *ReconcileCrcCluster) ensureIngressExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*networkingv1beta1.Ingress, error) {
-	ingress, err := r.newIngressForCrcCluster(crc)
+func (r *ReconcileCrcCluster) ensureAPIIngressExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster) (*networkingv1beta1.Ingress, error) {
+	ingress, err := r.newAPIIngressForCrcCluster(crc)
 	if err != nil {
 		logger.Error(err, "Failed to create Kubernetes Ingress.", "Ingress.Namespace", ingress.Namespace, "Ingress.Name", ingress.Name)
 		return nil, err
@@ -1703,7 +1711,7 @@ func (r *ReconcileCrcCluster) newServiceForCrcCluster(crc *crcv1alpha1.CrcCluste
 	return svc, nil
 }
 
-func (r *ReconcileCrcCluster) newRouteForCrcCluster(crc *crcv1alpha1.CrcCluster) (*routev1.Route, error) {
+func (r *ReconcileCrcCluster) newAPIRouteForCrcCluster(crc *crcv1alpha1.CrcCluster) (*routev1.Route, error) {
 	labels := map[string]string{
 		"crcCluster": crc.Name,
 	}
@@ -1744,7 +1752,7 @@ func (r *ReconcileCrcCluster) newRouteForCrcCluster(crc *crcv1alpha1.CrcCluster)
 	return route, nil
 }
 
-func (r *ReconcileCrcCluster) newIngressForCrcCluster(crc *crcv1alpha1.CrcCluster) (*networkingv1beta1.Ingress, error) {
+func (r *ReconcileCrcCluster) newAPIIngressForCrcCluster(crc *crcv1alpha1.CrcCluster) (*networkingv1beta1.Ingress, error) {
 	labels := map[string]string{
 		"crcCluster": crc.Name,
 	}
@@ -1833,8 +1841,8 @@ func createSSHClient(k8sService *corev1.Service, bundle *bundles.Bundle) (sshCli
 	return sshClient, nil
 }
 
-func consoleHost(baseDomain string) string {
-	return fmt.Sprintf("console-openshift-console.%s", baseDomain)
+func routeHostForDomain(baseDomain, routeName, routeNamespace string) string {
+	return fmt.Sprintf("%s-%s.%s", routeName, routeNamespace, baseDomain)
 }
 
 func generateKubeUserPassword() (string, error) {
