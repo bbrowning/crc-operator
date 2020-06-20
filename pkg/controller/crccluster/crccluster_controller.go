@@ -400,6 +400,12 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
+	reqLogger.Info("Updating infrastructure status.apiServerURL.")
+	if err := r.updateAPIServerURL(crc, insecureCrcK8sConfig); err != nil {
+		reqLogger.Error(err, "Error updating infrastructure status.apiServerURL.")
+		return reconcile.Result{}, err
+	}
+
 	reqLogger.Info("Updating default routes.")
 	routesUpdated, err := r.updateDefaultRoutes(crc, insecureCrcK8sConfig)
 	if err != nil {
@@ -911,6 +917,25 @@ func (r *ReconcileCrcCluster) waitForOpenShiftAPIServer(k8sClient *kubernetes.Cl
 		}
 	}
 	return false, nil
+}
+
+func (r *ReconcileCrcCluster) updateAPIServerURL(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) error {
+	configClient, err := configv1Client.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+	infra, err := configClient.Infrastructures().Get("cluster", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if infra.Status.APIServerURL != crc.Status.APIURL {
+		infra.Status.APIServerURL = crc.Status.APIURL
+		_, err := configClient.Infrastructures().UpdateStatus(infra)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Clientset) ([]corev1.Pod, error) {
