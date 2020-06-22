@@ -30,6 +30,23 @@ spec:
             type: object
           spec:
             description: CrcBundleSpec defines the desired state of CrcBundle
+            properties:
+              image:
+                description: Image is the container image containing the VM image
+                  for this bundle
+                type: string
+              kubeconfig:
+                description: Kubeconfig is the base64 encoded initial kubeconfig to
+                  connect to this bundle
+                type: string
+              sshKey:
+                description: SSHKey is the base64 encoded SSH key used to connect
+                  to the Node in this bundle
+                type: string
+            required:
+            - image
+            - kubeconfig
+            - sshKey
             type: object
           status:
             description: CrcBundleStatus defines the observed state of CrcBundle

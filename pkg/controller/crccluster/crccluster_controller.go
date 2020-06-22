@@ -19,7 +19,6 @@ import (
 	"time"
 
 	crcv1alpha1 "github.com/bbrowning/crc-operator/pkg/apis/crc/v1alpha1"
-	"github.com/bbrowning/crc-operator/pkg/bundles"
 	libMachineLog "github.com/code-ready/machine/libmachine/log"
 	sshClient "github.com/code-ready/machine/libmachine/ssh"
 	"github.com/go-logr/logr"
@@ -64,6 +63,7 @@ var log = logf.Log.WithName("controller_crccluster")
 
 var defaultBundleName = os.Getenv("DEFAULT_BUNDLE_NAME")
 var routesHelperImage = os.Getenv("ROUTES_HELPER_IMAGE")
+var bundleNs = os.Getenv("POD_NAMESPACE")
 
 const (
 	sshPort int = 2022
@@ -78,6 +78,10 @@ func Add(mgr manager.Manager) error {
 	}
 	if routesHelperImage == "" {
 		log.Error(fmt.Errorf("ROUTES_HELPER_IMAGE environment variable must be set"), "")
+		os.Exit(1)
+	}
+	if bundleNs == "" {
+		log.Error(fmt.Errorf("POD_NAMESPACE environment variable must be set"), "")
 		os.Exit(1)
 	}
 	return add(mgr, newReconciler(mgr))
@@ -227,14 +231,14 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		crc, err = r.initializeStatusConditions(reqLogger, crc)
 	}
 
-	bundle, err := bundleForCrc(crc)
+	bundle, err := r.bundleForCrc(crc)
 	if err != nil {
 		// TODO: This is a permanent error and thus should just fail
 		// some condition
 		reqLogger.Error(err, "Failed to get bundle for CrcCluster.")
 		return reconcile.Result{}, err
 	}
-	reqLogger.Info("Located bundle for cluster", "Bundle.Name", bundle.Name, "Bundle.Image", bundle.Image)
+	reqLogger.Info("Located bundle for cluster", "Bundle.Name", bundle.Name, "Bundle.Spec.Image", bundle.Spec.Image)
 
 	virtualMachine, err := r.ensureVirtualMachineExists(reqLogger, crc, bundle)
 	if err != nil {
@@ -733,8 +737,12 @@ func (r *ReconcileCrcCluster) updateCrcClusterStatus(crc *crcv1alpha1.CrcCluster
 	return crc, nil
 }
 
-func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*rest.Config, error) {
-	kubeconfigBytes := []byte(strings.ReplaceAll(bundle.Kubeconfig, "https://api.crc.testing:6443", crc.Status.APIURL))
+func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.CrcBundle) (*rest.Config, error) {
+	bundleKubeconfig, err := base64.StdEncoding.DecodeString(bundle.Spec.Kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	kubeconfigBytes := []byte(strings.ReplaceAll(string(bundleKubeconfig), "https://api.crc.testing:6443", crc.Status.APIURL))
 	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
 	if err != nil {
 		return nil, err
@@ -1188,7 +1196,7 @@ func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.C
 	return nil
 }
 
-func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*crcv1alpha1.CrcCluster, error) {
+func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.CrcBundle) (*crcv1alpha1.CrcCluster, error) {
 	output, err := sshClient.Output(`sudo systemctl status kubelet; if [ $? == 0 ]; then echo "__kubelet_running: true"; else echo "__kubelet_running: false"; fi`)
 	if err != nil {
 		logger.Error(err, "Error checking kubelet status in VirtualMachine.")
@@ -1369,7 +1377,7 @@ func (r *ReconcileCrcCluster) initializeStatusConditions(logger logr.Logger, crc
 	return crc, nil
 }
 
-func (r *ReconcileCrcCluster) ensureVirtualMachineExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*kubevirtv1.VirtualMachine, error) {
+func (r *ReconcileCrcCluster) ensureVirtualMachineExists(logger logr.Logger, crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.CrcBundle) (*kubevirtv1.VirtualMachine, error) {
 	virtualMachine, err := r.newVirtualMachineForCrcCluster(crc, bundle)
 	if err != nil {
 		logger.Error(err, "Failed to create VirtualMachine.", "VirtualMachine.Namespace", virtualMachine.Namespace, "VirtualMachine.Name", virtualMachine.Name)
@@ -1546,7 +1554,7 @@ func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) err
 	return nil
 }
 
-func bundleForCrc(crc *crcv1alpha1.CrcCluster) (*bundles.Bundle, error) {
+func (r *ReconcileCrcCluster) bundleForCrc(crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcBundle, error) {
 	bundleName := crc.Spec.BundleName
 	if bundleName == "" {
 		bundleName = defaultBundleName
@@ -1556,23 +1564,53 @@ func bundleForCrc(crc *crcv1alpha1.CrcCluster) (*bundles.Bundle, error) {
 	// First, see if a BundleImage was given and exactly matches one
 	// of the predefined bundle images
 	if bundleImage != "" {
-		bundle, err := bundles.BundleFromImage(bundleImage)
+		bundle, err := r.bundleFromImage(bundleImage)
 		if err == nil {
 			return bundle, nil
 		}
 	}
 	// Now, attempt to find the bundle by name
-	bundle, err := bundles.BundleFromName(bundleName)
+	bundle, err := r.bundleFromName(bundleName)
 	if err != nil {
 		return nil, err
 	}
 	if bundleImage != "" {
-		bundle.Image = bundleImage
+		bundle.Spec.Image = bundleImage
 	}
 	return bundle, nil
 }
 
-func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *bundles.Bundle) (*kubevirtv1.VirtualMachine, error) {
+func (r *ReconcileCrcCluster) bundleFromImage(image string) (*crcv1alpha1.CrcBundle, error) {
+	bundleList := &crcv1alpha1.CrcBundleList{}
+	err := r.client.List(context.TODO(), bundleList, &client.ListOptions{Namespace: bundleNs})
+	if err != nil {
+		return nil, err
+	}
+	for _, bundle := range bundleList.Items {
+		if image == bundle.Spec.Image {
+			copiedBundle := bundle
+			return &copiedBundle, nil
+		}
+	}
+	return nil, fmt.Errorf("No known bundle matches image %s", image)
+}
+
+func (r *ReconcileCrcCluster) bundleFromName(name string) (*crcv1alpha1.CrcBundle, error) {
+	bundleList := &crcv1alpha1.CrcBundleList{}
+	err := r.client.List(context.TODO(), bundleList, &client.ListOptions{Namespace: bundleNs})
+	if err != nil {
+		return nil, err
+	}
+	for _, bundle := range bundleList.Items {
+		if name == bundle.Name {
+			copiedBundle := bundle
+			return &copiedBundle, nil
+		}
+	}
+	return nil, fmt.Errorf("No known bundle matches name %s", name)
+}
+
+func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.CrcBundle) (*kubevirtv1.VirtualMachine, error) {
 	labels := map[string]string{
 		"crcCluster":          crc.Name,
 		"kubevirt.io/domain":  crc.Name,
@@ -1588,7 +1626,7 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 	}
 
 	containerDisk := kubevirtv1.ContainerDiskSource{
-		Image: bundle.Image,
+		Image: bundle.Spec.Image,
 	}
 	podNetwork := kubevirtv1.PodNetwork{}
 	vmRunning := true
@@ -1850,8 +1888,12 @@ func (r *ReconcileCrcCluster) newAPIIngressForCrcCluster(crc *crcv1alpha1.CrcClu
 	return ingress, nil
 }
 
-func createSSHClient(k8sService *corev1.Service, bundle *bundles.Bundle) (sshClient.Client, error) {
-	privateKey, err := ssh.ParsePrivateKey([]byte(bundle.SSHKey))
+func createSSHClient(k8sService *corev1.Service, bundle *crcv1alpha1.CrcBundle) (sshClient.Client, error) {
+	bundleSSHKey, err := base64.StdEncoding.DecodeString(bundle.Spec.SSHKey)
+	if err != nil {
+		return nil, err
+	}
+	privateKey, err := ssh.ParsePrivateKey(bundleSSHKey)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse private key: %v", err)
 	}

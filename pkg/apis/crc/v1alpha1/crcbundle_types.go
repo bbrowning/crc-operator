@@ -12,6 +12,18 @@ type CrcBundleSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
+
+	// Image is the container image containing the VM image for this
+	// bundle
+	Image string `json:"image"`
+
+	// SSHKey is the base64 encoded SSH key used to connect to the
+	// Node in this bundle
+	SSHKey string `json:"sshKey"`
+
+	// Kubeconfig is the base64 encoded initial kubeconfig to connect
+	// to this bundle
+	Kubeconfig string `json:"kubeconfig"`
 }
 
 // CrcBundleStatus defines the observed state of CrcBundle

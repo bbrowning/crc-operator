@@ -62,7 +62,7 @@ along with the steps below.
 
 ### Deploy the operator
 
-Create the CrcCluster CRD
+Create the necessary Custom Resource Definitions
 
 ```
 oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.0.3/release-v0.0.3_crd.yaml

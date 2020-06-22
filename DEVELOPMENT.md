@@ -95,5 +95,11 @@ popd
 
 ### Using the new bundle image to start a CRC cluster
 
-Use the `spec.bundleImage` field in the `CrcCluster` object to point
-to a custom CRC image.
+Create a new CrcBundle resource, using the examples in
+deploy/crds/crc.developer.openshift.io_v1alpha1_crcbundle_cr.yaml as a
+guide. The `sshKey` and `kubeconfig` fields need to be
+base64-encoded. It's best to strip out the certificate-authority-data
+field from the original CRC kubeconfig and replace it with
+`insecure-skip-tls-verify: true`, at least until the operator figures
+out how to generate the proper certificate authority data for its API
+server URL.

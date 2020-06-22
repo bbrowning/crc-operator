@@ -15,4 +15,8 @@ release:
 	@cat deploy/role_binding.yaml >> deploy/releases/release-v$(RELEASE_VERSION).yaml
 	@echo -e "\n---\n" >> deploy/releases/release-v$(RELEASE_VERSION).yaml
 	@cat deploy/operator.yaml | sed -e "s|REPLACE_IMAGE|quay.io/bbrowning/crc-operator:v$(RELEASE_VERSION)|g" -e "s|REPLACE_ROUTES_HELPER_IMAGE|quay.io/bbrowning/crc-operator-routes-helper:v$(RELEASE_VERSION)|g" >> deploy/releases/release-v$(RELEASE_VERSION).yaml
-	@cp deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml deploy/releases/release-v$(RELEASE_VERSION)_crd.yaml
+	@echo -e "\n---\n" >> deploy/releases/release-v$(RELEASE_VERSION).yaml >> deploy/releases/release-v$(RELEASE_VERSION).yaml
+	@cat deploy/crds/crc.developer.openshift.io_v1alpha1_crcbundle_cr.yaml >> deploy/releases/release-v$(RELEASE_VERSION).yaml
+	@cat deploy/crds/crc.developer.openshift.io_crcclusters_crd.yaml > deploy/releases/release-v$(RELEASE_VERSION)_crd.yaml
+	@echo -e "\n---\n" >> deploy/releases/release-v$(RELEASE_VERSION)_crd.yaml
+	@cat deploy/crds/crc.developer.openshift.io_crcbundles_crd.yaml >> deploy/releases/release-v$(RELEASE_VERSION)_crd.yaml
