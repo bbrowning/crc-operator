@@ -928,8 +928,12 @@ func (r *ReconcileCrcCluster) updateAPIServerURL(crc *crcv1alpha1.CrcCluster, re
 	if err != nil {
 		return err
 	}
-	if infra.Status.APIServerURL != crc.Status.APIURL {
-		infra.Status.APIServerURL = crc.Status.APIURL
+	// APIServerURL always needs a port until
+	// https://github.com/openshift/cluster-kube-apiserver-operator/pull/855
+	// get merged
+	desiredAPIServerURL := fmt.Sprintf("%s:443", crc.Status.APIURL)
+	if infra.Status.APIServerURL != desiredAPIServerURL {
+		infra.Status.APIServerURL = desiredAPIServerURL
 		_, err := configClient.Infrastructures().UpdateStatus(infra)
 		if err != nil {
 			return err
