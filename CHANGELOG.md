@@ -1,3 +1,15 @@
+# Release 0.1.0
+- A new `CrcBundle` API controls which CRC bundles are available for
+  use. The default installation installs bundles for recent versions
+  of OCP.
+- There is now optionally persistent storage with configurable disk
+  size for CRC clusters. The default is ephemeral (not persistent)
+  storage. Set `spec.storage.persitent` to `true` in your `CrcCluster`
+  to enable persistence. Set `spec.storage.size` to a value like
+  `100Gi` to specify the size of the persistent storage. The
+  underlying Node in the CRC cluster will automatically grow its root
+  partition to the specified size.
+
 # Release 0.0.3
 - You may now specify which CRC bundle (and thus OCP version) to start
   with a new `bundleName` field in the CRD spec. Valid bundle names

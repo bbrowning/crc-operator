@@ -48,6 +48,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	kubevirtv1 "kubevirt.io/client-go/api/v1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -943,7 +944,14 @@ func (r *ReconcileCrcCluster) updateAPIServerURL(crc *crcv1alpha1.CrcCluster, re
 	if infra.Status.APIServerURL != desiredAPIServerURL {
 		infra.Status.APIServerURL = desiredAPIServerURL
 		_, err := configClient.Infrastructures().UpdateStatus(infra)
-		if err != nil {
+		if err != nil && errors.IsNotFound(err) {
+			// OCP versions older than 4.5 didn't use the status
+			// subresource for Infrastructure
+			_, err = configClient.Infrastructures().Update(infra)
+			if err != nil {
+				return err
+			}
+		} else {
 			return err
 		}
 	}
@@ -1266,6 +1274,9 @@ echo 'Started monitorKubeApiServer.sh'
 
 		startKubeletScript := fmt.Sprintf(`
 set -e
+echo "> Growing root filesystem."
+sudo xfs_growfs /
+
 echo "> Setting up DNS and starting kubelet."
 echo ">> Setting up dnsmasq.conf"
 echo "user=root
@@ -1625,9 +1636,6 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 		},
 	}
 
-	containerDisk := kubevirtv1.ContainerDiskSource{
-		Image: bundle.Spec.Image,
-	}
 	podNetwork := kubevirtv1.PodNetwork{}
 	vmRunning := true
 	diskBootOrder := uint(1)
@@ -1682,9 +1690,6 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 			Volumes: []kubevirtv1.Volume{
 				{
 					Name: "rootdisk",
-					VolumeSource: kubevirtv1.VolumeSource{
-						ContainerDisk: &containerDisk,
-					},
 				},
 			},
 		},
@@ -1720,6 +1725,65 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 		corev1.ResourceMemory: guestMemory,
 	}
 	vm.Spec.Template.Spec.Domain.Resources.Requests = vmResources
+
+	storageSpec := crc.Spec.Storage
+	if storageSpec.Persistent {
+		// Persistent, so use a DataVolume to import the container
+		// image into a new PVC.
+		dataVolumeName := fmt.Sprintf("%s-datavolume", crc.Name)
+
+		bundleQuantity, err := resource.ParseQuantity(bundle.Spec.DiskSize)
+		if err != nil {
+			return vm, err
+		}
+		var storageQuantity resource.Quantity
+		if crc.Spec.Storage.Size != "" {
+			storageQuantity, err = resource.ParseQuantity(crc.Spec.Storage.Size)
+			if err != nil {
+				return vm, err
+			}
+			if storageQuantity.Cmp(bundleQuantity) < 0 {
+				return vm, fmt.Errorf("Requested storage size %s is less than the minimum disk size of %s needed by bundle %s", crc.Spec.Storage.Size, bundle.Spec.DiskSize, bundle.Name)
+			}
+		} else {
+			storageQuantity = bundleQuantity
+		}
+
+		dataVolumeTemplate := cdiv1.DataVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: dataVolumeName,
+			},
+			Spec: cdiv1.DataVolumeSpec{
+				Source: cdiv1.DataVolumeSource{
+					Registry: &cdiv1.DataVolumeSourceRegistry{
+						URL: fmt.Sprintf("docker://%s", bundle.Spec.Image),
+					},
+				},
+				PVC: &corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: storageQuantity,
+						},
+					},
+				},
+			},
+		}
+		vm.Spec.DataVolumeTemplates = []cdiv1.DataVolume{dataVolumeTemplate}
+
+		vm.Spec.Template.Spec.Volumes[0].VolumeSource = kubevirtv1.VolumeSource{
+			DataVolume: &kubevirtv1.DataVolumeSource{
+				Name: dataVolumeName,
+			},
+		}
+	} else {
+		// Not persisent, so use the bundle's container image directly
+		vm.Spec.Template.Spec.Volumes[0].VolumeSource = kubevirtv1.VolumeSource{
+			ContainerDisk: &kubevirtv1.ContainerDiskSource{
+				Image: bundle.Spec.Image,
+			},
+		}
+	}
 
 	if err := controllerutil.SetControllerReference(crc, vm, r.scheme); err != nil {
 		return vm, err

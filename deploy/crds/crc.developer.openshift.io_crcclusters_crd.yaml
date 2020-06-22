@@ -60,6 +60,27 @@ spec:
               pullSecret:
                 description: PullSecret is your base64-encoded OpenShift pull secret
                 type: string
+              storage:
+                description: Storage is the storage options to use. If not set, a
+                  default will be chosen by the CRC Operator.
+                properties:
+                  persistent:
+                    default: false
+                    description: Persistent controls whether any data in this cluster
+                      should persist if the cluster gets rebooted. Persistent storage
+                      takes longer and costs more to provision. If this is false,
+                      the cluster will be reset to the original state if the Node
+                      its running on reboots or if the cluster itself gets shut down.
+                      Defaults to false.
+                    type: boolean
+                  size:
+                    description: Size is the amount of persistent disk space to allocate
+                      to the cluster. This is ignored unless Persistent is set to
+                      true.
+                    type: string
+                required:
+                - persistent
+                type: object
             required:
             - cpu
             - memory

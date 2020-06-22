@@ -68,8 +68,7 @@ rules:
 - apiGroups:
   - crc.developer.openshift.io
   resources:
-  - crcclusters
-  - crcbundles
+  - "*"
   verbs:
   - create
   - delete

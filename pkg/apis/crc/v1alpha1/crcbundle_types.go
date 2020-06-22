@@ -17,6 +17,9 @@ type CrcBundleSpec struct {
 	// bundle
 	Image string `json:"image"`
 
+	// DiskSize is the size of the disk in this bundle
+	DiskSize string `json:"diskSize"`
+
 	// SSHKey is the base64 encoded SSH key used to connect to the
 	// Node in this bundle
 	SSHKey string `json:"sshKey"`

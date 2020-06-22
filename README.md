@@ -38,6 +38,8 @@ You also need a functioning install of [Container-native
 Virtualization](https://docs.openshift.com/container-platform/4.4/cnv/cnv_install/installing-container-native-virtualization.html)
 on OpenShift or
 [KubeVirt](https://kubevirt.io/user-guide/#/installation/installation)
+and [Containerized Data
+Importer](https://github.com/kubevirt/containerized-data-importer/releases/download/v1.19.0/cdi-operator.yaml)
 on Kubernetes.
 
 ### OpenShift cluster-bot
@@ -97,7 +99,7 @@ oc create ns crc
 ```
 
 Create an OpenShift 4.4.5 cluster (the default if `bundleName` is
-unspecified):
+unspecified) with ephemeral storage:
 
 ```
 cat <<EOF | oc apply -f -
@@ -114,7 +116,7 @@ spec:
 EOF
 ```
 
-Or, to create an OpenShift 4.5.0-rc.2 cluster:
+Or, to create an OpenShift 4.5.0-rc.2 cluster with ephemeral storage:
 
 ```
 cat <<EOF | oc apply -f -
@@ -131,6 +133,27 @@ spec:
 EOF
 ```
 
+Or, to create an OpenShift 4.5.0-rc.2 cluster with larger persistent
+storage that will survive stops, starts, node reboots, and so on:
+
+```
+cat <<EOF | oc apply -f -
+apiVersion: crc.developer.openshift.io/v1alpha1
+kind: CrcCluster
+metadata:
+  name: my-cluster-persistent
+  namespace: crc
+spec:
+  cpu: 6
+  memory: 16Gi
+  pullSecret: $(cat pull-secret | base64 -w 0)
+  bundleName: ocp450rc2
+  storage:
+    persistent: true
+    size: 100Gi
+EOF
+```
+
 Wait for the new cluster to become ready:
 
 ```
@@ -138,10 +161,13 @@ oc wait --for=condition=Ready crc/my-cluster -n crc --timeout=1800s
 ```
 
 
-On reasonably sized Nodes, the CRC cluster usually comes up in 7-8
-minutes. The very first time a CRC cluster is created on a Node, it
-can take quite a bit longer while the CRC VM image is pulled into the
-container image cache on that Node.
+On reasonably sized Nodes, a CRC cluster with ephemeral storage
+usually comes up in 7-8 minutes. The very first time a CRC cluster is
+created on a Node, it can take quite a bit longer while the CRC VM
+image is pulled into the container image cache on that Node. A CRC
+cluster with persistent storage can easily take twice as long to come
+up the first time, although it has the added benefit of not losing
+data if a Node reboots or the cluster gets stopped.
 
 If the CRC cluster never becomes Ready, check the operator pod logs
 (as shown in the installation section above) and the known issues list

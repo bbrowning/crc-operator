@@ -17,6 +17,7 @@ require (
 	k8s.io/client-go v12.0.0+incompatible
 	k8s.io/kube-openapi v0.0.0-20200410145947-bcb3869e6f29 // indirect
 	kubevirt.io/client-go v0.30.0
+	kubevirt.io/containerized-data-importer v1.10.6
 	sigs.k8s.io/controller-runtime v0.5.5
 )
 

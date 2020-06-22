@@ -42,6 +42,26 @@ type CrcClusterSpec struct {
 	// will be chosen by the CRC Operator.
 	// +kubebuilder:validation:Enum=ocp445;ocp450rc1;ocp450rc2
 	BundleName string `json:"bundleName,omitempty"`
+
+	// Storage is the storage options to use. If not set, a default
+	// will be chosen by the CRC Operator.
+	Storage CrcStorageSpec `json:"storage,omitempty"`
+}
+
+// CrcStorageSpec defines the desired storage of CrcCluster
+type CrcStorageSpec struct {
+	// Persistent controls whether any data in this cluster should
+	// persist if the cluster gets rebooted. Persistent storage takes
+	// longer and costs more to provision. If this is false, the
+	// cluster will be reset to the original state if the Node its
+	// running on reboots or if the cluster itself gets shut
+	// down. Defaults to false.
+	// +kubebuilder:default=false
+	Persistent bool `json:"persistent"`
+
+	// Size is the amount of persistent disk space to allocate to the
+	// cluster. This is ignored unless Persistent is set to true.
+	Size string `json:"size,omitempty"`
 }
 
 const (
