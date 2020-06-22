@@ -1,0 +1,7 @@
+apiVersion: crc.developer.openshift.io/v1alpha1
+kind: CrcBundle
+metadata:
+  name: example-crcbundle
+spec:
+  # Add fields here
+  size: 3
