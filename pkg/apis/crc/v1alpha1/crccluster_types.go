@@ -40,12 +40,18 @@ type CrcClusterSpec struct {
 
 	// BundleName is the CRC bundle name to use. If not set, a default
 	// will be chosen by the CRC Operator.
-	// +kubebuilder:validation:Enum=ocp445;ocp450rc1;ocp450rc2
 	BundleName string `json:"bundleName,omitempty"`
 
 	// Storage is the storage options to use. If not set, a default
 	// will be chosen by the CRC Operator.
 	Storage CrcStorageSpec `json:"storage,omitempty"`
+
+	// Stopped indicates if this cluster should be stopped or
+	// running. Stopped clusters with ephemeral storage will lose all
+	// when they're stopped and will come up as if they're a new
+	// cluster when restarted. Stopped clusters with persistent
+	// storage will retain their data between stops and starts.
+	Stopped bool `json:"stopped,omitempty"`
 }
 
 // CrcStorageSpec defines the desired storage of CrcCluster
@@ -113,6 +119,9 @@ type CrcClusterStatus struct {
 
 	// KubeAdminPassword is the password to connect to the cluster as an administrator
 	KubeAdminPassword string `json:"kubeAdminPassword,omitempty"`
+
+	// Stopped indicates whether this cluster is stopped or running
+	Stopped bool `json:"stopped,omitempty"`
 
 	// Conditions represent the latest available observations of an object's state
 	Conditions status.Conditions `json:"conditions"`

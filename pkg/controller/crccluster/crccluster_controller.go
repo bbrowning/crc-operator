@@ -270,7 +270,14 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 	crc.Status.ConsoleURL = fmt.Sprintf("https://%s", routeHostForDomain(crc.Status.BaseDomain, "console", "openshift-console"))
 
 	r.updateVirtualMachineNotReadyCondition(virtualMachine, crc)
+	if virtualMachine.Spec.Running != nil && !*virtualMachine.Spec.Running {
+		crc.Status.Stopped = true
+	} else {
+		crc.Status.Stopped = false
+	}
+
 	r.updateNetworkingNotReadyCondition(k8sService, crc)
+
 	if err := r.updateCredentials(crc); err != nil {
 		return reconcile.Result{}, err
 	}
@@ -282,6 +289,11 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 
 	// Don't attempt any further reconciling until the VM is ready
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) {
+		if crc.Status.Stopped {
+			// The VM is not ready but the cluster is stopped, so we're good
+			reqLogger.Info("Cluster is stopped and virtual machine is not ready - this is expected")
+			return reconcile.Result{}, nil
+		}
 		reqLogger.Info("Waiting on the VirtualMachine to become Ready before continuing")
 		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
@@ -1418,6 +1430,13 @@ func (r *ReconcileCrcCluster) ensureVirtualMachineExists(logger logr.Logger, crc
 		logger.Error(err, "Failed to get VirtualMachine.")
 		return nil, err
 	}
+	if !reflect.DeepEqual(virtualMachine.Spec, existingVirtualMachine.Spec) {
+		existingVirtualMachine.Spec = virtualMachine.Spec
+		err := r.client.Update(context.TODO(), existingVirtualMachine)
+		if err != nil {
+			return nil, err
+		}
+	}
 	virtualMachine = existingVirtualMachine.DeepCopy()
 	return virtualMachine, nil
 }
@@ -1525,8 +1544,9 @@ func (r *ReconcileCrcCluster) ensureAPIIngressExists(logger logr.Logger, crc *cr
 }
 
 func (r *ReconcileCrcCluster) updateVirtualMachineNotReadyCondition(vm *kubevirtv1.VirtualMachine, crc *crcv1alpha1.CrcCluster) {
-	crc.SetConditionBool(crcv1alpha1.ConditionTypeVirtualMachineNotReady, !vm.Status.Ready)
-	if !vm.Status.Ready {
+	vmReady := vm.Spec.Running != nil && *vm.Spec.Running && vm.Status.Ready
+	crc.SetConditionBool(crcv1alpha1.ConditionTypeVirtualMachineNotReady, !vmReady)
+	if !vmReady {
 		// If the VM is no longer ready then we need to reconfigure
 		// everything when it comes back up
 		//
@@ -1534,6 +1554,7 @@ func (r *ReconcileCrcCluster) updateVirtualMachineNotReadyCondition(vm *kubevirt
 		// need to change
 		crc.SetConditionBool(crcv1alpha1.ConditionTypeKubeletNotReady, true)
 		crc.SetConditionBool(crcv1alpha1.ConditionTypeClusterNotConfigured, true)
+		crc.SetConditionBool(crcv1alpha1.ConditionTypeReady, false)
 	}
 }
 
@@ -1637,7 +1658,7 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 	}
 
 	podNetwork := kubevirtv1.PodNetwork{}
-	vmRunning := true
+	vmRunning := !crc.Spec.Stopped
 	diskBootOrder := uint(1)
 	diskTarget := kubevirtv1.DiskTarget{
 		Bus: "virtio",

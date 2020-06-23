@@ -44,10 +44,6 @@ spec:
               bundleName:
                 description: BundleName is the CRC bundle name to use. If not set,
                   a default will be chosen by the CRC Operator.
-                enum:
-                - ocp445
-                - ocp450rc1
-                - ocp450rc2
                 type: string
               cpu:
                 default: 4
@@ -60,6 +56,13 @@ spec:
               pullSecret:
                 description: PullSecret is your base64-encoded OpenShift pull secret
                 type: string
+              stopped:
+                description: Stopped indicates if this cluster should be stopped or
+                  running. Stopped clusters with ephemeral storage will lose all when
+                  they're stopped and will come up as if they're a new cluster when
+                  restarted. Stopped clusters with persistent storage will retain
+                  their data between stops and starts.
+                type: boolean
               storage:
                 description: Storage is the storage options to use. If not set, a
                   default will be chosen by the CRC Operator.
@@ -155,6 +158,10 @@ spec:
                 description: Kubeconfig is the base64-encoded kubeconfig to connect
                   to the cluster as an administrator
                 type: string
+              stopped:
+                description: Stopped indicates whether this cluster is stopped or
+                  running
+                type: boolean
             required:
             - conditions
             type: object
