@@ -977,7 +977,13 @@ func (r *ReconcileCrcCluster) waitForClusterToStabilize(k8sClient *kubernetes.Cl
 		return notReadyPods, err
 	}
 	for _, pod := range pods.Items {
+		openshiftNamespacesRegex := regexp.MustCompile(`^openshift-.*|kube-.*$`)
 		ignoredMarketplacePodsRegex := regexp.MustCompile(`^community-operators-.*|certified-operators-.*$`)
+		// Ignore all non-OpenShift pods
+		if !openshiftNamespacesRegex.MatchString(pod.Namespace) {
+			continue
+		}
+		// Ignore some of the marketplace operator pods
 		if pod.Namespace == "openshift-marketplace" && ignoredMarketplacePodsRegex.MatchString(pod.Name) {
 			continue
 		}
