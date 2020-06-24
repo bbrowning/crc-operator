@@ -1,3 +1,9 @@
+# Release 0.3.0
+- You can now enable monitoring on CrcClusters with the new
+  `spec.enableMonitoring` *bool field. A value of true enables
+  monitoring, a value of false disables it, and an unset value doesn't
+  express an opinion.
+
 # Release 0.2.1
 - The route helper pod is now cleaned up when stopping a cluster and
   redeployed when starting that cluster again.
