@@ -287,6 +287,14 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{}, err
 	}
 
+	if crc.Status.Stopped {
+		reqLogger.Info("Deleting route helper pod for stopped cluster.")
+		if err := r.deleteRouteHelperPod(crc); err != nil {
+			reqLogger.Error(err, "Error deleting route helper pod.")
+			return reconcile.Result{}, err
+		}
+	}
+
 	// Don't attempt any further reconciling until the VM is ready
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeVirtualMachineNotReady) {
 		if crc.Status.Stopped {
@@ -509,6 +517,22 @@ func (r *ReconcileCrcCluster) deployRouteHelperPod(crc *crcv1alpha1.CrcCluster) 
 		return err
 	}
 	if err := r.ensureRouteHelperDeployment(crc); err != nil {
+		return err
+	}
+	return nil
+}
+func (r *ReconcileCrcCluster) deleteRouteHelperPod(crc *crcv1alpha1.CrcCluster) error {
+	deploymentName := fmt.Sprintf("%s-route-helper", crc.Name)
+
+	existingDeployment := &appsv1.Deployment{}
+	err := r.client.Get(context.TODO(), types.NamespacedName{Name: deploymentName, Namespace: crc.Namespace}, existingDeployment)
+	if err != nil && errors.IsNotFound(err) {
+		// Deployment is already gone so nothing to do
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := r.client.Delete(context.TODO(), existingDeployment); err != nil {
 		return err
 	}
 	return nil
