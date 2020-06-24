@@ -1,3 +1,19 @@
+# Release 0.2.0
+- You can now explicitly stop (but not delete) CrcClusters with the
+  new `spec.stopped` boolean field. A value of true stops the cluster,
+  a value of false starts the cluster. The default is false, meaning
+  running. There's a corresponding `status.stopped` that can be read
+  to know when the operator has actually stopped the cluster. This can
+  work for clusters with ephemeral or persistent storage, but
+  ephemeral clusters lose all their data between the stop and
+  start. Persistent clusters retain their data.
+- Only pods in the `openshift-*` or `kube-*` namespaces are considered
+  when checking for cluster readiness. The starting and stopping work
+  above exposed a problem where any random pod in the cluster could
+  cause the operator to wait forever for readiness when it may be that
+  random user pods were not coming up cleanly before stopping the
+  cluster.
+
 # Release 0.1.0
 - A new `CrcBundle` API controls which CRC bundles are available for
   use. The default installation installs bundles for recent versions

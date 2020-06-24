@@ -49,6 +49,7 @@ version in the first step:
 
 ```
 export RELEASE_VERSION=0.0.1
+export RELEASE_REGISTRY=quay.io/bbrowning
 make release
 git add version/version.go
 git add deploy/releases/release-v${RELEASE_VERSION}_crd.yaml 
