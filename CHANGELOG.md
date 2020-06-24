@@ -1,3 +1,7 @@
+# Release 0.2.1
+- The route helper pod is now cleaned up when stopping a cluster and
+  redeployed when starting that cluster again.
+
 # Release 0.2.0
 - You can now explicitly stop (but not delete) CrcClusters with the
   new `spec.stopped` boolean field. A value of true stops the cluster,
