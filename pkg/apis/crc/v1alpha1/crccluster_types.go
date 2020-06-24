@@ -52,6 +52,18 @@ type CrcClusterSpec struct {
 	// cluster when restarted. Stopped clusters with persistent
 	// storage will retain their data between stops and starts.
 	Stopped bool `json:"stopped,omitempty"`
+
+	// EnableMonitoring indicates if this cluster should have
+	// OpenShift's cluster-monitoring-operator enabled by
+	// default. It's not suggested to enable this unless you assign at
+	// least 6 CPUs and 16GB of memory to this cluster. If set to true
+	// or false, the operator will enforce that choice every time the
+	// cluster is started. If left unset entirely, the operator will
+	// not enforce either way. Setting this to false will set the
+	// cluster-monitoring-operator to an unmanaged state but it will
+	// not actually delete the resources out of the
+	// openshift-monitoring namespace.
+	EnableMonitoring *bool `json:"enableMonitoring,omitempty"`
 }
 
 // CrcStorageSpec defines the desired storage of CrcCluster

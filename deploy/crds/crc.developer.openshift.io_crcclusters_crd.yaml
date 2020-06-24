@@ -49,6 +49,17 @@ spec:
                 default: 4
                 description: CPU is the number of CPUs to allocate to the cluster
                 type: integer
+              enableMonitoring:
+                description: EnableMonitoring indicates if this cluster should have
+                  OpenShift's cluster-monitoring-operator enabled by default. It's
+                  not suggested to enable this unless you assign at least 6 CPUs and
+                  16GB of memory to this cluster. If set to true or false, the operator
+                  will enforce that choice every time the cluster is started. If left
+                  unset entirely, the operator will not enforce either way. Setting
+                  this to false will set the cluster-monitoring-operator to an unmanaged
+                  state but it will not actually delete the resources out of the openshift-monitoring
+                  namespace.
+                type: boolean
               memory:
                 default: 16Gi
                 description: Memory is the amount of memory to allocate to the cluster

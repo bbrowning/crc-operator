@@ -107,7 +107,7 @@ func (in *CrcCluster) DeepCopyInto(out *CrcCluster) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-	out.Spec = in.Spec
+	in.Spec.DeepCopyInto(&out.Spec)
 	in.Status.DeepCopyInto(&out.Status)
 	return
 }
@@ -167,6 +167,11 @@ func (in *CrcClusterList) DeepCopyObject() runtime.Object {
 func (in *CrcClusterSpec) DeepCopyInto(out *CrcClusterSpec) {
 	*out = *in
 	out.Storage = in.Storage
+	if in.EnableMonitoring != nil {
+		in, out := &in.EnableMonitoring, &out.EnableMonitoring
+		*out = new(bool)
+		**out = **in
+	}
 	return
 }
 

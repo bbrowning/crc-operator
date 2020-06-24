@@ -67,7 +67,8 @@ var routesHelperImage = os.Getenv("ROUTES_HELPER_IMAGE")
 var bundleNs = os.Getenv("POD_NAMESPACE")
 
 const (
-	sshPort int = 2022
+	sshPort      int    = 2022
+	monitoringNs string = "openshift-monitoring"
 )
 
 // Add creates a new CrcCluster Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -438,6 +439,15 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{}, err
 	} else if routesUpdated {
 		return reconcile.Result{RequeueAfter: time.Second * 20}, nil
+	}
+
+	if crc.Spec.EnableMonitoring != nil {
+		enableMonitoring := *crc.Spec.EnableMonitoring
+		reqLogger.Info("Enabling or disable monitoring", "EnableMonitoring", enableMonitoring)
+		if err := r.enableMonitoring(enableMonitoring, insecureCrcK8sConfig); err != nil {
+			reqLogger.Error(err, "Error enabling/disabling monitoring.")
+			return reconcile.Result{}, err
+		}
 	}
 
 	reqLogger.Info("Waiting on cluster to stabilize.")
@@ -1175,7 +1185,7 @@ func (r *ReconcileCrcCluster) updateDefaultRoutes(crc *crcv1alpha1.CrcCluster, r
 	defaultRouteNamespaces := []string{
 		"openshift-console",
 		"openshift-image-registry",
-		"openshift-monitoring",
+		monitoringNs,
 	}
 	for _, routeNs := range defaultRouteNamespaces {
 		routes, err := routeClient.Routes(routeNs).List(metav1.ListOptions{})
@@ -1194,6 +1204,59 @@ func (r *ReconcileCrcCluster) updateDefaultRoutes(crc *crcv1alpha1.CrcCluster, r
 		}
 	}
 	return updatedRoutes, nil
+}
+
+func (r *ReconcileCrcCluster) enableMonitoring(shouldEnable bool, restConfig *rest.Config) error {
+	configClient, err := configv1Client.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+	clusterVersion, err := configClient.ClusterVersions().Get("version", metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	clusterVersion = clusterVersion.DeepCopy()
+
+	monitoringOverride := configv1.ComponentOverride{
+		Kind:      "Deployment",
+		Group:     "apps/v1",
+		Name:      "cluster-monitoring-operator",
+		Namespace: monitoringNs,
+		Unmanaged: true,
+	}
+	monitoringIndex := -1
+	monitoringEnabled := true
+	for i, override := range clusterVersion.Spec.Overrides {
+		if override.Kind == monitoringOverride.Kind && override.Group == monitoringOverride.Group && override.Name == monitoringOverride.Name && override.Namespace == monitoringOverride.Namespace {
+			monitoringIndex = i
+			monitoringEnabled = !override.Unmanaged
+			break
+		}
+	}
+	if monitoringEnabled && !shouldEnable {
+		// Monitoring is enabled but should be disabled
+		if monitoringIndex >= 0 {
+			clusterVersion.Spec.Overrides[monitoringIndex].Unmanaged = true
+		} else {
+			clusterVersion.Spec.Overrides = append(clusterVersion.Spec.Overrides, monitoringOverride)
+		}
+		if _, err := configClient.ClusterVersions().Update(clusterVersion); err != nil {
+			return err
+		}
+	} else if !monitoringEnabled && shouldEnable {
+		// Monitoring is disabled but should be enabled
+		if monitoringIndex >= 0 {
+			clusterVersion.Spec.Overrides = append(clusterVersion.Spec.Overrides[:monitoringIndex], clusterVersion.Spec.Overrides[monitoringIndex+1:]...)
+			if _, err := configClient.ClusterVersions().Update(clusterVersion); err != nil {
+				return err
+			}
+		} else {
+			// We should never get here because how was it disabled if
+			// the index is < 0?
+			return fmt.Errorf("monitoring is disabled but no clusterversion override found")
+		}
+	}
+	return nil
 }
 
 func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.CrcCluster, restConfig *rest.Config) error {
