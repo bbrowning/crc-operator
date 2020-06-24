@@ -255,10 +255,6 @@ cases significantly.
   both too aggressive liveness probes for those pods combined with
   quay.io IP-based rate limiting and all these clusters appearing as
   one IP to quay.io.
-- The disk size is fixed at 30GB for now. A future release will add
-  that as an option when creating the cluster.
-- The disk attached to the VM is ephemeral for now. A future release
-  will add a persistent disk option.
 
 # Development
 
