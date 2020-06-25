@@ -1,3 +1,6 @@
+# Release 0.3.1
+- Added an OpenShift 4.4.8 bundle in the default install
+
 # Release 0.3.0
 - You can now enable monitoring on CrcClusters with the new
   `spec.enableMonitoring` *bool field. A value of true enables
