@@ -8,18 +8,22 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	crcv1alpha1 "github.com/bbrowning/crc-operator/pkg/apis/crc/v1alpha1"
 	libMachineLog "github.com/code-ready/machine/libmachine/log"
+	"github.com/code-ready/machine/libmachine/mcnutils"
 	sshClient "github.com/code-ready/machine/libmachine/ssh"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
@@ -67,8 +71,9 @@ var routesHelperImage = os.Getenv("ROUTES_HELPER_IMAGE")
 var bundleNs = os.Getenv("POD_NAMESPACE")
 
 const (
-	sshPort      int    = 2022
-	monitoringNs string = "openshift-monitoring"
+	sshPort       int    = 2022
+	apiServerPort int    = 6443
+	monitoringNs  string = "openshift-monitoring"
 )
 
 // Add creates a new CrcCluster Controller and adds it to the Manager. The Manager will set fields on the Controller
@@ -307,14 +312,50 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
-	sshClient, err := createSSHClient(k8sService, bundle)
+	clusterHost := fmt.Sprintf("%s.%s", k8sService.Name, k8sService.Namespace)
+
+	reqLogger.Info("Checking if the VirtualMachine is accessible via SSH")
+	if !tcpPortOpen(clusterHost, sshPort) {
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
+	bundleSSHClient, err := createSSHClient(k8sService, bundle.Spec.SSHKey)
+	if err != nil {
+		// TODO: likely a permanent error here
+		reqLogger.Error(err, "Failed to create SSH Client.")
+		return reconcile.Result{}, err
+	}
+
+	var clusterSSHClient *sshClient.NativeClient
+	if crc.Status.SSHKey != "" {
+		clusterSSHClient, err = createSSHClient(k8sService, crc.Status.SSHKey)
+		if err != nil {
+			reqLogger.Error(err, "Failed to create SSH Client.")
+			return reconcile.Result{}, err
+		}
+	}
+	reqLogger.Info("Generating unique SSH key for cluster")
+	crc, err = r.ensureUniqueSSHKey(bundleSSHClient, clusterSSHClient, crc)
+	if err != nil {
+		reqLogger.Error(err, "Failed to generate unique SSH key for cluster")
+		return reconcile.Result{}, err
+	}
+
+	// Create this client again to ensure we have the latest ssh key
+	clusterSSHClient, err = createSSHClient(k8sService, crc.Status.SSHKey)
 	if err != nil {
 		reqLogger.Error(err, "Failed to create SSH Client.")
 		return reconcile.Result{}, err
 	}
 
+	reqLogger.Info("Updating SSH authorized_keys in cluster")
+	if err := r.updateClusterSSHKey(clusterSSHClient); err != nil {
+		reqLogger.Error(err, "Failed to update SSH authorized_keys in cluster")
+		return reconcile.Result{}, err
+	}
+
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeKubeletNotReady) {
-		crc, err = r.ensureKubeletStarted(reqLogger, sshClient, crc, bundle)
+		crc, err = r.ensureKubeletStarted(reqLogger, clusterSSHClient, crc, bundle)
 		if err != nil {
 			reqLogger.Error(err, "Failed to start Kubelet.")
 			return reconcile.Result{}, err
@@ -341,6 +382,11 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		return reconcile.Result{}, err
 	}
 
+	reqLogger.Info("Checking if the API server is up")
+	if !tcpPortOpen(clusterHost, apiServerPort) {
+		return reconcile.Result{RequeueAfter: time.Second * 10}, nil
+	}
+
 	if crc.Status.Conditions.IsTrueFor(crcv1alpha1.ConditionTypeClusterNotConfigured) {
 		reqLogger.Info("Updating cluster admin password.")
 		if err := r.updateClusterAdminUser(crc, insecureK8sClient); err != nil {
@@ -349,7 +395,7 @@ func (r *ReconcileCrcCluster) Reconcile(request reconcile.Request) (reconcile.Re
 		}
 
 		reqLogger.Info("Updating pull secret.")
-		if err := r.updatePullSecret(crc, sshClient, insecureK8sClient); err != nil {
+		if err := r.updatePullSecret(crc, clusterSSHClient, insecureK8sClient); err != nil {
 			reqLogger.Error(err, "Error updating pull secret.")
 			return reconcile.Result{}, err
 		}
@@ -774,12 +820,6 @@ func (r *ReconcileCrcCluster) updateCrcClusterStatus(crc *crcv1alpha1.CrcCluster
 		if err != nil {
 			return crc, err
 		}
-		updatedCrc := &crcv1alpha1.CrcCluster{}
-		err = r.client.Get(context.TODO(), types.NamespacedName{Name: crc.Name, Namespace: crc.Namespace}, updatedCrc)
-		if err != nil {
-			return crc, err
-		}
-		crc = updatedCrc.DeepCopy()
 	}
 	return crc, nil
 }
@@ -798,14 +838,14 @@ func restConfigFromCrcCluster(crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.C
 	return config, nil
 }
 
-func (r *ReconcileCrcCluster) updatePullSecret(crc *crcv1alpha1.CrcCluster, sshClient sshClient.Client, k8sClient *kubernetes.Clientset) error {
+func (r *ReconcileCrcCluster) updatePullSecret(crc *crcv1alpha1.CrcCluster, sshClient *sshClient.NativeClient, k8sClient *kubernetes.Clientset) error {
 	// Copy pull secret to node
 	pullSecretScript := fmt.Sprintf(`
 set -e
 echo "%s" | base64 -d | sudo tee /var/lib/kubelet/config.json
 sudo chmod 0600 /var/lib/kubelet/config.json
 `, crc.Spec.PullSecret)
-	output, err := sshClient.Output(pullSecretScript)
+	output, err := sshQuickOutput(sshClient, pullSecretScript)
 	if err != nil {
 		fmt.Println(output)
 		return err
@@ -1309,13 +1349,79 @@ func (r *ReconcileCrcCluster) ensureIngressControllersUpdated(crc *crcv1alpha1.C
 	return nil
 }
 
-func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient sshClient.Client, crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.CrcBundle) (*crcv1alpha1.CrcCluster, error) {
-	output, err := sshClient.Output(`sudo systemctl status kubelet; if [ $? == 0 ]; then echo "__kubelet_running: true"; else echo "__kubelet_running: false"; fi`)
+func (r *ReconcileCrcCluster) ensureUniqueSSHKey(bundleSSHClient *sshClient.NativeClient, clusterSSHClient *sshClient.NativeClient, crc *crcv1alpha1.CrcCluster) (*crcv1alpha1.CrcCluster, error) {
+	generateKeyScript := `
+cd ~/.ssh
+if [ ! -f crc_operator ]; then
+  ssh-keygen -q -t rsa -b 4096 -N '' -f crc_operator -C 'core@crc-operator'
+fi
+cat authorized_keys | grep -q 'core@crc-operator'
+if [ $? -gt 0 ]; then
+  cat crc_operator.pub >> authorized_keys
+fi
+cat crc_operator
+`
+	var output string
+	var err error
+	if clusterSSHClient == nil {
+		// New cluster - use the bundle's SSH key
+		output, err = sshQuickOutput(bundleSSHClient, generateKeyScript)
+		if err != nil {
+			return crc, err
+		}
+	} else {
+		// Existing cluster - try the cluster's specific key
+		output, err = sshQuickOutput(clusterSSHClient, generateKeyScript)
+		if err != nil {
+			// Maybe this is a non-persistent cluster that got
+			// rebooted - try the bundle's key
+			output, err = sshQuickOutput(bundleSSHClient, generateKeyScript)
+			if err != nil {
+				return crc, err
+			}
+		}
+	}
+	clusterPrivateKey := []byte(output)
+	_, err = ssh.ParsePrivateKey(clusterPrivateKey)
+	if err != nil {
+		return crc, err
+	}
+	base64PrivateKey := base64.StdEncoding.EncodeToString(clusterPrivateKey)
+	if crc.Status.SSHKey != base64PrivateKey {
+		crc.Status.SSHKey = base64PrivateKey
+
+		crc, err = r.updateCrcClusterStatus(crc)
+		if err != nil {
+			return crc, err
+		}
+	}
+	return crc, nil
+}
+
+func (r *ReconcileCrcCluster) updateClusterSSHKey(clusterSSHClient *sshClient.NativeClient) error {
+	oldKeyRemovalScript := fmt.Sprintf(`
+rm -fr ~/.ssh/authorized_keys.d
+sed -i '/core@crc-operator/!d' ~/.ssh/authorized_keys
+`)
+	_, err := sshQuickOutput(clusterSSHClient, oldKeyRemovalScript)
+	if err != nil {
+		return err
+	}
+
+	// One final SSH to ensure we can still connect
+	_, err = sshQuickOutput(clusterSSHClient, "date")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *ReconcileCrcCluster) ensureKubeletStarted(logger logr.Logger, sshClient *sshClient.NativeClient, crc *crcv1alpha1.CrcCluster, bundle *crcv1alpha1.CrcBundle) (*crcv1alpha1.CrcCluster, error) {
+	output, err := sshQuickOutput(sshClient, `sudo systemctl status kubelet; if [ $? == 0 ]; then echo "__kubelet_running: true"; else echo "__kubelet_running: false"; fi`)
 	if err != nil {
 		logger.Error(err, "Error checking kubelet status in VirtualMachine.")
 		return crc, err
 	}
-	fmt.Printf("Kubelet status: %s\n", output)
 
 	kubeletRunning := strings.Contains(output, "__kubelet_running: true")
 
@@ -1438,7 +1544,7 @@ if [ $? == 0 ]; then
 fi
 `, crc.Status.BaseDomain, nameserver, insecureReadyzHack)
 
-		output, err := sshClient.Output(startKubeletScript)
+		output, err := sshQuickOutput(sshClient, startKubeletScript)
 		if err != nil {
 			logger.Error(err, "Error checking kubelet status in VirtualMachine.")
 			fmt.Println(output)
@@ -1669,6 +1775,9 @@ func (r *ReconcileCrcCluster) updateCredentials(crc *crcv1alpha1.CrcCluster) err
 	}
 
 	if crc.Status.KubeAdminClientKey == "" {
+		// TODO: Should use crypto/rsa instead?
+		// ie rsa.GenerateKey(rand.Reader, 4096)
+		// Or is shelling out to openssl better for FIPS?
 		key, err := exec.Command("openssl", "genrsa", "4096").Output()
 		if err != nil {
 			return err
@@ -1928,8 +2037,8 @@ func (r *ReconcileCrcCluster) newServiceForCrcCluster(crc *crcv1alpha1.CrcCluste
 				{
 					Name:       "api",
 					Protocol:   corev1.ProtocolTCP,
-					Port:       6443,
-					TargetPort: intstr.FromInt(6443),
+					Port:       int32(apiServerPort),
+					TargetPort: intstr.FromInt(apiServerPort),
 				},
 				{
 					Name:       "http",
@@ -1962,7 +2071,7 @@ func (r *ReconcileCrcCluster) newAPIRouteForCrcCluster(crc *crcv1alpha1.CrcClust
 	}
 
 	port := routev1.RoutePort{
-		TargetPort: intstr.FromInt(6443),
+		TargetPort: intstr.FromInt(apiServerPort),
 	}
 	tls := routev1.TLSConfig{
 		Termination: routev1.TLSTerminationPassthrough,
@@ -2014,7 +2123,7 @@ func (r *ReconcileCrcCluster) newAPIIngressForCrcCluster(crc *crcv1alpha1.CrcClu
 				Path: "/",
 				Backend: networkingv1beta1.IngressBackend{
 					ServiceName: crc.Name,
-					ServicePort: intstr.FromInt(6443),
+					ServicePort: intstr.FromInt(apiServerPort),
 				},
 			},
 		},
@@ -2066,12 +2175,12 @@ func (r *ReconcileCrcCluster) newAPIIngressForCrcCluster(crc *crcv1alpha1.CrcClu
 	return ingress, nil
 }
 
-func createSSHClient(k8sService *corev1.Service, bundle *crcv1alpha1.CrcBundle) (sshClient.Client, error) {
-	bundleSSHKey, err := base64.StdEncoding.DecodeString(bundle.Spec.SSHKey)
+func createSSHClient(k8sService *corev1.Service, base64SSHKey string) (*sshClient.NativeClient, error) {
+	sshKey, err := base64.StdEncoding.DecodeString(base64SSHKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Failed to decode base64 SSH key: %v", err)
 	}
-	privateKey, err := ssh.ParsePrivateKey(bundleSSHKey)
+	privateKey, err := ssh.ParsePrivateKey(sshKey)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse private key: %v", err)
 	}
@@ -2140,4 +2249,66 @@ func generateRandomPasswordHash(length int) (string, error) {
 		pw[replace] = '-'
 	}
 	return string(pw), nil
+}
+
+func tcpPortOpen(host string, port int) bool {
+	timeout := 5 * time.Second
+	connection, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout)
+	if err != nil {
+		return false
+	}
+	if connection != nil {
+		defer connection.Close()
+		return true
+	}
+	return false
+}
+
+// libmachine hacks here...
+//
+// need to open an issue upstream to remove its hardcoded 3 minute
+// retry loop on dial
+func sshQuickSession(client *sshClient.NativeClient, command string) (*ssh.Client, *ssh.Session, error) {
+	if err := mcnutils.WaitForSpecific(sshDialSuccess(client), 3, 2*time.Second); err != nil {
+		return nil, nil, fmt.Errorf("Error attempting SSH client dial: %s", err)
+	}
+
+	conn, err := ssh.Dial("tcp", net.JoinHostPort(client.Hostname, strconv.Itoa(client.Port)), &client.Config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Mysterious error dialing TCP for SSH (we already succeeded at least once) : %s", err)
+	}
+	session, err := conn.NewSession()
+
+	return conn, session, err
+}
+
+func sshQuickOutput(client *sshClient.NativeClient, command string) (string, error) {
+	conn, session, err := sshQuickSession(client, command)
+	if err != nil {
+		return "", err
+	}
+	defer sshCloseConn(conn)
+	defer session.Close()
+
+	output, err := session.CombinedOutput(command)
+
+	return string(output), err
+}
+
+func sshDialSuccess(client *sshClient.NativeClient) func() bool {
+	return func() bool {
+		conn, err := ssh.Dial("tcp", net.JoinHostPort(client.Hostname, strconv.Itoa(client.Port)), &client.Config)
+		if err != nil {
+			return false
+		}
+		sshCloseConn(conn)
+		return true
+	}
+}
+
+func sshCloseConn(c io.Closer) {
+	err := c.Close()
+	if err != nil {
+		// ignored
+	}
 }

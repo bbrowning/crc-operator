@@ -132,6 +132,10 @@ type CrcClusterStatus struct {
 	// KubeAdminPassword is the password to connect to the cluster as an administrator
 	KubeAdminPassword string `json:"kubeAdminPassword,omitempty"`
 
+	// SSHKey is the unique base64 encoded SSH key used to connect to
+	// this Node after initial setup
+	SSHKey string `json:"sshKey,omitempty"`
+
 	// Stopped indicates whether this cluster is stopped or running
 	Stopped bool `json:"stopped,omitempty"`
 
