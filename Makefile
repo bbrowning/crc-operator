@@ -1,5 +1,9 @@
 RELEASE_REGISTRY ?= "quay.io/bbrowning"
 
+operator-dev:
+	@operator-sdk build $(RELEASE_REGISTRY)/crc-operator:vdev
+	@podman push $(RELEASE_REGISTRY)/crc-operator:vdev
+
 release:
 	@echo "Checking for RELEASE_VERSION environment variable..."
 	[ ! -z "$(RELEASE_VERSION)" ]
