@@ -1,3 +1,8 @@
+# Release 0.4.0
+- Added an OpenShift 4.5.0-rc.4 bundle
+- Every cluster gets a unique SSH key generated for the Node when
+  starting the cluster and the default one from the bundle revoked.
+
 # Release 0.3.1
 - Added an OpenShift 4.4.8 bundle in the default install
 
