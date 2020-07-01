@@ -241,9 +241,6 @@ cases significantly.
   API server URL and follow those instructions.
 - Credentials are stored directly in the CRD status for now. A future
   release will move these into Secrets.
-- CRC bundle images are hardcoded at the moment. A future release will
-  add a new API to change the available bundle images without code
-  changes.
 - The client certificate in the kubeconfig generated for the kubeadmin
   user is only valid for one month or less. Perhaps we shouldn't
   provide that and expect a user to just `oc login` with their
