@@ -1,3 +1,6 @@
+# Release 0.4.2
+- Added an OpenShift 4.5.0-rc.5 bundle in the default install
+
 # Release 0.4.1
 - The operator will no longer wait for pods in the
   `openshift-operators` namespace to come up before marking a cluster
