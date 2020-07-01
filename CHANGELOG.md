@@ -1,3 +1,9 @@
+# Release 0.4.1
+- The operator will no longer wait for pods in the
+  `openshift-operators` namespace to come up before marking a cluster
+  as ready. These pods are cluster-wide optional operators and not
+  required for core functioning of the cluster.
+
 # Release 0.4.0
 - Added an OpenShift 4.5.0-rc.4 bundle
 - Every cluster gets a unique SSH key generated for the Node when
