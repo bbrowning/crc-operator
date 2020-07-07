@@ -1,3 +1,6 @@
+# Release 0.4.3
+- Added an OpenShift 4.5.0-rc.6 bundle in the default install
+
 # Release 0.4.2
 - Added an OpenShift 4.5.0-rc.5 bundle in the default install
 
