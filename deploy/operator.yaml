@@ -36,4 +36,4 @@ spec:
             - name: ROUTES_HELPER_IMAGE
               value: REPLACE_ROUTES_HELPER_IMAGE
             - name: DEFAULT_BUNDLE_NAME
-              value: ocp445
+              value: ocp448

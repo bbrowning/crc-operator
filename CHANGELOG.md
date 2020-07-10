@@ -1,3 +1,15 @@
+# Release 0.5.0
+- Release artifacts now split out the default bundles from the rest of
+  the release. This allows a user to update the operator without
+  overwriting their bundle configurations.
+- Add a new `spec.url` field to `CrcBundle` resources to specify an
+  optional URL that will be used, if given, when provisioning
+  persistent clusters. This URL should point to a qcow2 or raw virtual
+  machine image over HTTP or HTTPS. This significantly speeds up the
+  initial provisioning time of persistent clusters compared to using a
+  container image. Container images are still used for all
+  non-persistent clusters.
+
 # Release 0.4.3
 - Added an OpenShift 4.5.0-rc.6 bundle in the default install
 

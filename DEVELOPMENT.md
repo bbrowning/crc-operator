@@ -54,6 +54,7 @@ make release
 git add version/version.go
 git add deploy/releases/release-v${RELEASE_VERSION}_crd.yaml 
 git add deploy/releases/release-v${RELEASE_VERSION}.yaml
+git add deploy/releases/release-v${RELEASE_VERSION}_bundles.yaml
 git commit -m "Release v${RELEASE_VERSION}"
 git tag v${RELEASE_VERSION}
 git push origin master --tags

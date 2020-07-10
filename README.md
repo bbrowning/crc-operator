@@ -68,20 +68,28 @@ Create the necessary Custom Resource Definitions
 
 ```
 
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.4.3/release-v0.4.3_crd.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.0/release-v0.5.0_crd.yaml
 ```
 
 Deploy the operator
 
 ```
 oc create ns crc-operator
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.4.3/release-v0.4.3.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.0/release-v0.5.0.yaml
 ```
 
 Ensure the operator comes up with no errors in its logs
 
 ```
 oc logs deployment/crc-operator -n crc-operator
+```
+
+Deploy some bundles - the actual CRC virtual machine images. A default
+set that anyone can use is shipped with each release. Advanced users
+may want to create their own as described in [DEVELOPMENT.md]().
+
+```
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.0/release-v0.5.0.yaml
 ```
 
 ## Create a CRC cluster
@@ -99,8 +107,7 @@ Create a crc namespace:
 oc create ns crc
 ```
 
-Create an OpenShift 4.4.5 cluster (the default if `bundleName` is
-unspecified) with ephemeral storage:
+Create an OpenShift 4.4.8 cluster with ephemeral storage:
 
 ```
 cat <<EOF | oc apply -f -
@@ -113,7 +120,7 @@ spec:
   cpu: 6
   memory: 16Gi
   pullSecret: $(cat pull-secret | base64 -w 0)
-  bundleName: ocp445
+  bundleName: ocp448
 EOF
 ```
 
