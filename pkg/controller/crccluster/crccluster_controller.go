@@ -1983,11 +1983,7 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 				Name: dataVolumeName,
 			},
 			Spec: cdiv1.DataVolumeSpec{
-				Source: cdiv1.DataVolumeSource{
-					Registry: &cdiv1.DataVolumeSourceRegistry{
-						URL: fmt.Sprintf("docker://%s", bundle.Spec.Image),
-					},
-				},
+				Source: cdiv1.DataVolumeSource{},
 				PVC: &corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					Resources: corev1.ResourceRequirements{
@@ -1997,6 +1993,15 @@ func (r *ReconcileCrcCluster) newVirtualMachineForCrcCluster(crc *crcv1alpha1.Cr
 					},
 				},
 			},
+		}
+		if bundle.Spec.URL != "" {
+			dataVolumeTemplate.Spec.Source.HTTP = &cdiv1.DataVolumeSourceHTTP{
+				URL: bundle.Spec.URL,
+			}
+		} else {
+			dataVolumeTemplate.Spec.Source.Registry = &cdiv1.DataVolumeSourceRegistry{
+				URL: fmt.Sprintf("docker://%s", bundle.Spec.Image),
+			}
 		}
 		vm.Spec.DataVolumeTemplates = []cdiv1.DataVolume{dataVolumeTemplate}
 

@@ -17,6 +17,15 @@ type CrcBundleSpec struct {
 	// bundle
 	Image string `json:"image"`
 
+	// URL is the http/https URL containing the VM image for this
+	// bundle. This is not required and if provided should contain the
+	// same qcow2/raw VM image that's inside the container specified
+	// in the Image field. If given, persistent clusters will use this
+	// instead of the container image as it avoids the need for
+	// temporary scratch space to extract the VM image from the
+	// container image.
+	URL string `json:"url,omitempty"`
+
 	// DiskSize is the size of the disk in this bundle
 	DiskSize string `json:"diskSize"`
 

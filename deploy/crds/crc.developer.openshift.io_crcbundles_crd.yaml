@@ -46,6 +46,14 @@ spec:
                 description: SSHKey is the base64 encoded SSH key used to connect
                   to the Node in this bundle
                 type: string
+              url:
+                description: URL is the http/https URL containing the VM image for
+                  this bundle. This is not required and if provided should contain
+                  the same qcow2/raw VM image that's inside the container specified
+                  in the Image field. If given, persistent clusters will use this
+                  instead of the container image as it avoids the need for temporary
+                  scratch space to extract the VM image from the container image.
+                type: string
             required:
             - diskSize
             - image

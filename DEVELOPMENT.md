@@ -94,6 +94,18 @@ podman push quay.io/bbrowning/crc_bundle_4.5.0-rc.1
 popd
 ```
 
+Optionally, also upload that VM image to somewhere accessible over
+HTTP(S) to speed up creation of new persistent clusters from this VM
+image. If you're using an S3-compatible object store (S3, DigitalOcean
+Spaces, and so on), something like:
+
+```
+s3cmd put crc_4.5.0-rc.1.qcow2 s3://your-bucket/
+```
+
+Ensure spec.image points to your container image and spec.url points
+to your HTTP(S) URL.
+
 ### Using the new bundle image to start a CRC cluster
 
 Create a new CrcBundle resource, using the examples in
