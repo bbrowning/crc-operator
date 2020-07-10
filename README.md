@@ -89,7 +89,7 @@ set that anyone can use is shipped with each release. Advanced users
 may want to create their own as described in [DEVELOPMENT.md]().
 
 ```
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.0/release-v0.5.0.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.0/release-v0.5.0_bundles.yaml
 ```
 
 ## Create a CRC cluster
