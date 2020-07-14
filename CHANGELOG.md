@@ -1,3 +1,8 @@
+# Release 0.5.1
+- Fixed OCP 4.3 / K8s 1.16 compatibility in route-helper pod by
+  explicitly using `deployment.apps` instead of `deployment` in `oc`
+  commands
+
 # Release 0.5.0
 - Release artifacts now split out the default bundles from the rest of
   the release. This allows a user to update the operator without

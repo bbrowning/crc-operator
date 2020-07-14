@@ -48,7 +48,7 @@ OWNER_REFERENCES="ownerReferences:
   - apiVersion: apps/v1
     kind: Deployment
     name: ${CRC_NAME}-route-helper
-    uid: $(oc get deployment -n ${CRC_NAMESPACE} ${CRC_NAME}-route-helper -o jsonpath={.metadata.uid})"
+    uid: $(oc get deployment.apps -n ${CRC_NAMESPACE} ${CRC_NAME}-route-helper -o jsonpath={.metadata.uid})"
 
 while $SHOULD_LOOP; do
   while read line; do
