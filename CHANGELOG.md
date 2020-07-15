@@ -1,3 +1,9 @@
+# Release 0.5.2
+- The `openshift-operators-redhat`, `openshift-serverless`, and
+  `openshift-cnv` namespaces are now excluded from pod readiness
+  checks to determine cluster health. None of these namespaces have an
+  impact on the overall cluster availability.
+
 # Release 0.5.1
 - Fixed OCP 4.3 / K8s 1.16 compatibility in route-helper pod by
   explicitly using `deployment.apps` instead of `deployment` in `oc`
