@@ -32,6 +32,12 @@ if [ -z "$VM_NAME" -o -z "$VM_NAMESPACE" -o -z "$PULL_SECRET_FILE" -o ! -f "$PUL
   exit 1
 fi
 
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  BASE64="base64"
+else
+  BASE64="base64 -w 0"
+fi
+
 oc get namespace ${VM_NAMESPACE} 1>/dev/null
 
 log "> Starting CRC Cluster ${VM_NAME} in namespace ${VM_NAMESPACE} with ${VM_CPUS} CPUs and ${VM_MEMORY} of memory- this can take up to 15 minutes..."
@@ -45,7 +51,7 @@ metadata:
 spec:
   cpu: ${VM_CPUS}
   memory: ${VM_MEMORY}
-  pullSecret: $(cat $PULL_SECRET_FILE | base64 -w 0)
+  pullSecret: $(cat $PULL_SECRET_FILE | $BASE64)
 EOF
 
 log "> Waiting for ${VM_NAME} cluster to be ready"
