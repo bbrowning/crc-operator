@@ -1,3 +1,9 @@
+# Release 0.5.3
+- All pods in the `openshift-marketplace` are now ignored when
+  determining whether a cluster is ready. Sometimes those pods can
+  crashloop if quay.io is slow or down but the cluster otherwise
+  functions.
+
 # Release 0.5.2
 - The `openshift-operators-redhat`, `openshift-serverless`, and
   `openshift-cnv` namespaces are now excluded from pod readiness

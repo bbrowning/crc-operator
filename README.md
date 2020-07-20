@@ -68,14 +68,14 @@ Create the necessary Custom Resource Definitions
 
 ```
 
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.2/release-v0.5.2_crd.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.3/release-v0.5.3_crd.yaml
 ```
 
 Deploy the operator
 
 ```
 oc create ns crc-operator
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.2/release-v0.5.2.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.3/release-v0.5.3.yaml
 ```
 
 Ensure the operator comes up with no errors in its logs
@@ -89,7 +89,7 @@ set that anyone can use is shipped with each release. Advanced users
 may want to create their own as described in [DEVELOPMENT.md]().
 
 ```
-oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.2/release-v0.5.2_bundles.yaml
+oc apply -f https://github.com/bbrowning/crc-operator/releases/download/v0.5.3/release-v0.5.3_bundles.yaml
 ```
 
 ## Create a CRC cluster
