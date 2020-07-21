@@ -1,3 +1,9 @@
+# Release 0.5.4
+- All pods in the `openshift-monitoring` namespace are now ignored
+  when determining whether a cluster is ready.
+- All pods in `openshift-pipeline.*` namespaces are now ignored when
+  determining whether a cluster is ready.
+  
 # Release 0.5.3
 - All pods in the `openshift-marketplace` are now ignored when
   determining whether a cluster is ready. Sometimes those pods can
